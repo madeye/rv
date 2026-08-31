@@ -38,3 +38,7 @@ cargo test --workspace
 | `rv-app` | GPUI UI |
 
 macOS is the primary target. Linux and Windows should compile via GPUI.
+
+## License
+
+[MIT](LICENSE) © 2026 Max Lv

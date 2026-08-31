@@ -8,7 +8,7 @@ edition = "2024"
 version = "0.1.0"
 license = "MIT"
 rust-version = "1.90"
-authors = ["RV"]
+authors = ["Max Lv"]
 
 [workspace.dependencies]
 anyhow = "1"
