@@ -19,6 +19,9 @@ tokio-rustls.workspace = true
 tracing.workspace = true
 vnc.workspace = true
 webpki-roots.workspace = true
+openssl.workspace = true
+tokio-openssl.workspace = true
 
 [dev-dependencies]
+openssl.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net", "io-util", "time"] }

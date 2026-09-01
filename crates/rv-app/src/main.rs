@@ -3,6 +3,9 @@ mod app;
 mod session_window;
 mod theme;
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use gpui::*;
 use gpui_component::{Root, TitleBar};
 
@@ -54,18 +57,30 @@ fn main() {
         let connect_to = connect_target(std::env::args().skip(1));
 
         cx.spawn(async move |cx| {
-            cx.open_window(options, |window, cx| {
-                let book = cx.new(|cx| {
-                    let mut app = AddressBookApp::new(window, cx);
-                    if let Some(target) = connect_to.as_deref() {
-                        app.connect_target(target, window, cx);
+            let slot: Rc<RefCell<Option<Entity<AddressBookApp>>>> = Rc::default();
+            let handle = cx
+                .open_window(options, {
+                    let slot = slot.clone();
+                    move |window, cx| {
+                        let book = cx.new(|cx| AddressBookApp::new(window, cx));
+                        *slot.borrow_mut() = Some(book.clone());
+                        let shell = cx.new(|_| WindowRoot::new(book));
+                        cx.new(|cx| Root::new(shell, window, cx))
                     }
-                    app
+                })
+                .expect("open address book");
+            // Connect only after the window has painted: loading the saved
+            // password may pop a modal Keychain prompt, and the user should
+            // see the address book behind it rather than nothing.
+            let book = slot.borrow().clone();
+            if let (Some(target), Some(book)) = (connect_to, book) {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(150))
+                    .await;
+                let _ = handle.update(cx, |_, window, cx| {
+                    book.update(cx, |app, cx| app.connect_target(&target, window, cx));
                 });
-                let shell = cx.new(|_| WindowRoot::new(book));
-                cx.new(|cx| Root::new(shell, window, cx))
-            })
-            .expect("open address book");
+            }
         })
         .detach();
     });

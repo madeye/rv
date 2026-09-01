@@ -26,6 +26,12 @@ impl From<vnc::VncError> for SessionError {
     }
 }
 
+impl From<openssl::error::ErrorStack> for SessionError {
+    fn from(e: openssl::error::ErrorStack) -> Self {
+        Self::Tls(e.to_string())
+    }
+}
+
 impl SessionError {
     pub fn msg(text: impl Into<String>) -> Self {
         Self::Message(text.into())

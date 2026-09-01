@@ -281,15 +281,6 @@ impl SessionView {
     }
 
     fn button(&mut self, bit: u8, down: bool, position: Point<Pixels>) {
-        tracing::trace!(
-            bit,
-            down,
-            ?position,
-            image_box = ?self.image_box.get(),
-            mapped = ?self.map_pointer(position),
-            phase = ?self.phase,
-            "pointer button"
-        );
         if down {
             self.buttons |= bit;
         } else {

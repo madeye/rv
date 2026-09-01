@@ -253,7 +253,7 @@ mod tests {
         // Only the 2×2 corner inside the framebuffer is written.
         assert_eq!(fb.pixels[(2 * 4 + 2) * 4], 9);
         assert_eq!(fb.pixels[(3 * 4 + 3) * 4], 9);
-        assert_eq!(fb.pixels[(1 * 4 + 1) * 4], 0);
+        assert_eq!(fb.pixels[(4 + 1) * 4], 0);
     }
 
     #[test]

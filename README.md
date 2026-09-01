@@ -12,7 +12,7 @@ A native desktop VNC viewer written in Rust with [GPUI](https://www.gpui.rs/). D
 - Reconnect from the disconnect / error overlay
 - Clipboard sync (Latin-1, per RFB)
 - VNC Auth, Tight / ZRLE / TRLE / Raw encodings
-- Optional VeNCrypt TLS (`Prefer on` / `Always`; X509 subtypes preferred)
+- VeNCrypt TLS: `TLSVnc` / `TLSNone` (anonymous TLS, TigerVNC's default) via OpenSSL, `X509Vnc` / `X509None` via rustls with WebPKI roots. `Let server choose` picks encryption automatically when the server offers nothing else
 - Passwords stored in the OS keychain
 
 ## Build
