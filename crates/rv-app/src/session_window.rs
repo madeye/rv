@@ -550,6 +550,10 @@ impl SessionView {
                 "Esc",
                 cx.listener(|this, _, _, _| this.tap_key(rv_core::XK_ESCAPE)),
             ))
+            .child(key_chip(
+                "Caps",
+                cx.listener(|this, _, _, _| this.tap_key(rv_core::XK_CAPS_LOCK)),
+            ))
             .child(toolbar_sep())
             .child(
                 tool_btn(

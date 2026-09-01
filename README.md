@@ -8,7 +8,7 @@ A native desktop VNC viewer written in Rust with [GPUI](https://www.gpui.rs/). D
 - Light / dark / system appearance
 - Session window with pinned or auto-hide toolbar, F8 menu, and connection info
 - Fit / 1:1 (scrollable) / stretch scaling and full screen
-- Mouse (left/middle/right, vertical + horizontal wheel), keyboard, Ctrl+Alt+Del and extra keys
+- Mouse (left/middle/right, vertical + horizontal wheel), keyboard, Ctrl+Alt+Del and extra keys (Ctrl/Alt/Win/Tab/Esc/Caps — Caps toggles the remote caps-lock)
 - Reconnect from the disconnect / error overlay
 - Clipboard sync (Latin-1, per RFB)
 - VNC Auth, Tight / ZRLE / TRLE / Raw encodings

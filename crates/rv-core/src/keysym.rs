@@ -24,6 +24,7 @@ pub const XK_ALT_L: u32 = 0xffe9;
 pub const XK_ALT_R: u32 = 0xffea;
 pub const XK_SUPER_L: u32 = 0xffeb;
 pub const XK_SUPER_R: u32 = 0xffec;
+pub const XK_CAPS_LOCK: u32 = 0xffe5;
 pub const XK_F1: u32 = 0xffbe;
 pub const XK_SPACE: u32 = 0x0020;
 
@@ -137,6 +138,7 @@ pub fn keysym_name(keysym: u32) -> &'static str {
         XK_DELETE => "Del",
         XK_SUPER_L => "Win",
         XK_TAB => "Tab",
+        XK_CAPS_LOCK => "Caps",
         XK_ESCAPE => "Esc",
         XK_RETURN => "Enter",
         _ => "Key",
