@@ -81,7 +81,7 @@ fn mock_rfb_server(mut sock: TcpStream) {
                     write_u32(&mut sock, 0); // Raw
                     let mut pixels = Vec::with_capacity(8 * 8 * 4);
                     for _ in 0..64 {
-                        pixels.extend_from_slice(&[0, 80, 200, 255]); // RGBA
+                        pixels.extend_from_slice(&[0, 80, 200, 255]); // BGRA
                     }
                     sock.write_all(&pixels).unwrap();
                     sent_frame = true;

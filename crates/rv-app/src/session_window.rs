@@ -1,16 +1,16 @@
+use std::cell::Cell;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
 
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_component::{
-    Icon, IconName, Selectable, Sizable, StyledExt, TitleBar,
+    Disableable as _, Icon, IconName, Selectable as _, Sizable, StyledExt, TitleBar,
     button::{Button, ButtonVariants as _},
-    h_flex,
-    menu::DropdownMenu,
-    v_flex,
+    h_flex, v_flex,
 };
 use image::{ImageBuffer, Rgba};
 use smallvec::SmallVec;
@@ -29,13 +29,19 @@ pub struct SessionOptions {
     pub thumb_path: Option<PathBuf>,
 }
 
-pub fn open(
-    req: ConnectRequest,
-    title: String,
-    session: SessionOptions,
-    _window: &mut Window,
-    cx: &mut App,
-) {
+/// Pixels of scroll per RFB wheel click. One notch of a mouse wheel is one
+/// line, which GPUI reports as this many pixels; trackpads accumulate.
+const WHEEL_STEP: f32 = 20.0;
+
+const BTN_LEFT: u8 = 1;
+const BTN_MIDDLE: u8 = 2;
+const BTN_RIGHT: u8 = 4;
+const BTN_WHEEL_UP: u8 = 8;
+const BTN_WHEEL_DOWN: u8 = 16;
+const BTN_WHEEL_LEFT: u8 = 32;
+const BTN_WHEEL_RIGHT: u8 = 64;
+
+pub fn open(req: ConnectRequest, title: String, session: SessionOptions, cx: &mut App) {
     // Open after the current window update finishes. Nesting `open_window`
     // inside another window's constructor tears the session window down.
     cx.spawn(async move |cx| {
@@ -58,27 +64,38 @@ pub fn open(
     .detach();
 }
 
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Phase {
+    Connecting,
+    Connected,
+    /// The session is over; `error` says whether it failed.
+    Ended,
+}
+
 pub struct SessionView {
+    req: ConnectRequest,
     handle: SessionHandle,
     title: SharedString,
-    host: SharedString,
     status: SharedString,
+    phase: Phase,
     scale: ScaleMode,
     pin_toolbar: bool,
     toolbar_open: bool,
     menu_key: String,
     hide_shots: bool,
     thumb_path: Option<PathBuf>,
-    view_only: bool,
-    fullscreen: bool,
     show_menu: bool,
     info_open: bool,
     buttons: u8,
+    wheel_accum: Point<f32>,
     last_generation: u64,
     render_image: Option<Arc<RenderImage>>,
     fb_w: u16,
     fb_h: u16,
     error: Option<SharedString>,
+    /// Where the remote picture was last painted, in window pixels. Filled
+    /// in by a probe element so pointer mapping never guesses chrome sizes.
+    image_box: Rc<Cell<Bounds<Pixels>>>,
     keys: Keyboard,
     focus: FocusHandle,
 }
@@ -91,9 +108,7 @@ impl SessionView {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) -> Self {
-        let host = format!("{}:{}", req.host, req.port);
-        let view_only = req.view_only;
-        let handle = SessionHandle::spawn(req);
+        let handle = SessionHandle::spawn(req.clone());
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let SessionOptions {
@@ -116,29 +131,38 @@ impl SessionView {
         .detach();
 
         Self {
+            req,
             handle,
             title: title.into(),
-            host: host.into(),
             status: "Connecting…".into(),
+            phase: Phase::Connecting,
             scale,
             pin_toolbar,
-            toolbar_open: true,
+            toolbar_open: pin_toolbar,
             menu_key,
             hide_shots,
             thumb_path,
-            view_only,
-            fullscreen: false,
             show_menu: false,
             info_open: false,
             buttons: 0,
+            wheel_accum: point(0.0, 0.0),
             last_generation: 0,
             render_image: None,
             fb_w: 0,
             fb_h: 0,
             error: None,
+            image_box: Rc::new(Cell::new(Bounds::default())),
             keys: Keyboard::new(),
             focus,
         }
+    }
+
+    fn view_only(&self) -> bool {
+        self.req.view_only
+    }
+
+    fn host(&self) -> String {
+        format!("{}:{}", self.req.host, self.req.port)
     }
 
     fn pump(&mut self, cx: &mut Context<Self>) {
@@ -147,19 +171,15 @@ impl SessionView {
         // events. Stalling it delays key-ups, which the remote turns into
         // auto-repeat.
         let mut frame = None;
+        let mut changed = false;
         for ev in self.handle.drain() {
+            changed = true;
             match ev {
                 SessionEvent::Status(s) => self.status = s.into(),
-                SessionEvent::Connected {
-                    width,
-                    height,
-                    name,
-                } => {
+                SessionEvent::Connected { width, height } => {
                     self.fb_w = width;
                     self.fb_h = height;
-                    if !name.is_empty() {
-                        self.title = name.into();
-                    }
+                    self.phase = Phase::Connected;
                     self.status = format!("{width}×{height}").into();
                     self.error = None;
                 }
@@ -174,7 +194,11 @@ impl SessionView {
                     self.status = e.into();
                 }
                 SessionEvent::Disconnected => {
-                    self.status = "Disconnected".into();
+                    if self.error.is_none() {
+                        self.status = "Disconnected".into();
+                    }
+                    self.phase = Phase::Ended;
+                    self.buttons = 0;
                     self.save_thumb();
                 }
             }
@@ -185,7 +209,9 @@ impl SessionView {
             self.last_generation = generation;
             self.rebuild_image(cx);
         }
-        cx.notify();
+        if changed {
+            cx.notify();
+        }
     }
 
     fn rebuild_image(&mut self, cx: &mut App) {
@@ -198,13 +224,11 @@ impl SessionView {
             if fb.width == 0 || fb.height == 0 {
                 return;
             }
+            // The compositor already stores BGRA, which is what RenderImage
+            // uploads, so this is a plain copy.
             (fb.width, fb.height, fb.pixels.clone())
         };
-        let (width, height, mut pixels) = snapshot;
-        // RenderImage uploads as BGRA; the compositor stores RGBA.
-        for px in pixels.chunks_exact_mut(4) {
-            px.swap(0, 2);
-        }
+        let (width, height, pixels) = snapshot;
         let Some(buf) = ImageBuffer::<Rgba<u8>, _>::from_raw(width as u32, height as u32, pixels)
         else {
             return;
@@ -232,33 +256,83 @@ impl SessionView {
         }
     }
 
-    fn map_pointer(&self, event: &dyn MouseEventLike, window: &Window) -> Option<(u16, u16)> {
-        let pos = event.position();
-        let win = window.bounds().size;
-        let chrome = f32::from(theme::titlebar_height())
-            + if self.pin_toolbar && self.toolbar_open {
-                f32::from(theme::toolbar_height()) * 2.0
-            } else {
-                0.0
-            };
-        let view_w = f32::from(win.width);
-        let view_h = (f32::from(win.height) - chrome).max(1.0);
-        let local_x = f32::from(pos.x);
-        let local_y = f32::from(pos.y) - chrome;
+    fn map_pointer(&self, position: Point<Pixels>) -> Option<(u16, u16)> {
+        let bounds = self.image_box.get();
+        let box_w = f32::from(bounds.size.width);
+        let box_h = f32::from(bounds.size.height);
+        let local_x = f32::from(position.x - bounds.origin.x);
+        let local_y = f32::from(position.y - bounds.origin.y);
         map_to_fb(
-            local_x, local_y, view_w, view_h, self.fb_w, self.fb_h, self.scale,
+            local_x, local_y, box_w, box_h, self.fb_w, self.fb_h, self.scale,
         )
     }
 
     fn send_pointer(&mut self, x: u16, y: u16) {
-        if self.view_only {
+        if self.view_only() || self.phase != Phase::Connected {
             return;
         }
         self.handle.pointer(x, y, self.buttons);
     }
 
+    fn pointer_at(&mut self, position: Point<Pixels>) {
+        if let Some((x, y)) = self.map_pointer(position) {
+            self.send_pointer(x, y);
+        }
+    }
+
+    fn button(&mut self, bit: u8, down: bool, position: Point<Pixels>) {
+        tracing::trace!(
+            bit,
+            down,
+            ?position,
+            image_box = ?self.image_box.get(),
+            mapped = ?self.map_pointer(position),
+            phase = ?self.phase,
+            "pointer button"
+        );
+        if down {
+            self.buttons |= bit;
+        } else {
+            self.buttons &= !bit;
+        }
+        self.pointer_at(position);
+    }
+
+    fn wheel(&mut self, ev: &ScrollWheelEvent) {
+        let delta = ev.delta.pixel_delta(px(WHEEL_STEP));
+        self.wheel_accum.x += f32::from(delta.x);
+        self.wheel_accum.y += f32::from(delta.y);
+        let Some((x, y)) = self.map_pointer(ev.position) else {
+            self.wheel_accum = point(0.0, 0.0);
+            return;
+        };
+        let mut clicks: Vec<u8> = Vec::new();
+        while self.wheel_accum.y <= -WHEEL_STEP {
+            self.wheel_accum.y += WHEEL_STEP;
+            clicks.push(BTN_WHEEL_DOWN);
+        }
+        while self.wheel_accum.y >= WHEEL_STEP {
+            self.wheel_accum.y -= WHEEL_STEP;
+            clicks.push(BTN_WHEEL_UP);
+        }
+        while self.wheel_accum.x <= -WHEEL_STEP {
+            self.wheel_accum.x += WHEEL_STEP;
+            clicks.push(BTN_WHEEL_RIGHT);
+        }
+        while self.wheel_accum.x >= WHEEL_STEP {
+            self.wheel_accum.x -= WHEEL_STEP;
+            clicks.push(BTN_WHEEL_LEFT);
+        }
+        for bit in clicks {
+            self.buttons |= bit;
+            self.send_pointer(x, y);
+            self.buttons &= !bit;
+            self.send_pointer(x, y);
+        }
+    }
+
     fn send_keys(&mut self, events: impl IntoIterator<Item = (u32, bool)>) {
-        if self.view_only {
+        if self.view_only() || self.phase != Phase::Connected {
             return;
         }
         for (keysym, down) in events {
@@ -266,31 +340,25 @@ impl SessionView {
         }
     }
 
-    fn extra_key(&mut self, keysym: u32) {
+    fn tap_key(&mut self, keysym: u32) {
         self.send_keys([(keysym, true), (keysym, false)]);
     }
 
     fn send_cad(&mut self) {
-        if self.view_only {
-            return;
-        }
-        for k in CAD_KEYSYMS {
-            self.handle.key(k, true);
-        }
-        for k in CAD_KEYSYMS.iter().rev() {
-            self.handle.key(*k, false);
-        }
+        let down = CAD_KEYSYMS.iter().map(|k| (*k, true));
+        let up = CAD_KEYSYMS.iter().rev().map(|k| (*k, false));
+        self.send_keys(down.chain(up));
     }
 
     fn send_clipboard(&mut self, cx: &App) {
-        if self.view_only {
+        if self.view_only() || self.phase != Phase::Connected {
             return;
         }
         if let Some(item) = cx.read_from_clipboard()
             && let Some(text) = item.text()
         {
             if text.chars().any(|c| c as u32 > 255) {
-                self.status = "Clipboard paste skipped: RFB is Latin-1 only".into();
+                self.status = "Clipboard not sent: RFB carries Latin-1 text only".into();
                 return;
             }
             self.handle.copy_text(text);
@@ -299,17 +367,44 @@ impl SessionView {
     }
 
     fn toggle_fullscreen(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.fullscreen = !self.fullscreen;
         window.toggle_fullscreen();
         cx.notify();
     }
 
+    fn set_scale(&mut self, scale: ScaleMode, cx: &mut Context<Self>) {
+        self.scale = scale;
+        cx.notify();
+    }
+
     fn disconnect(&mut self, cx: &mut Context<Self>) {
+        if self.phase == Phase::Ended {
+            return;
+        }
         self.save_thumb();
         let released = self.keys.release_all();
         self.send_keys(released);
         self.handle.close();
+        self.status = "Disconnecting…".into();
         cx.notify();
+    }
+
+    fn reconnect(&mut self, cx: &mut Context<Self>) {
+        self.handle = SessionHandle::spawn(self.req.clone());
+        self.phase = Phase::Connecting;
+        self.error = None;
+        self.status = "Connecting…".into();
+        self.buttons = 0;
+        self.last_generation = 0;
+        self.keys = Keyboard::new();
+        if let Some(old) = self.render_image.take() {
+            cx.drop_image(old, None);
+        }
+        cx.notify();
+    }
+
+    fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.disconnect(cx);
+        window.remove_window();
     }
 
     fn consume_key(&self, window: &mut Window, cx: &mut Context<Self>) {
@@ -317,25 +412,25 @@ impl SessionView {
         window.prevent_default();
     }
 
-    fn handle_key(
-        &mut self,
-        event: &KeyDownEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) -> bool {
+    fn handle_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
         tracing::debug!(
             key,
             key_char = ?event.keystroke.key_char,
             is_held = event.is_held,
-            prefer_character_input = event.prefer_character_input,
             "key down"
         );
         if key.eq_ignore_ascii_case(&self.menu_key) {
             self.show_menu = !self.show_menu;
             cx.notify();
             self.consume_key(window, cx);
-            return true;
+            return;
+        }
+        if self.show_menu && key == "escape" {
+            self.show_menu = false;
+            cx.notify();
+            self.consume_key(window, cx);
+            return;
         }
         let mods = event.keystroke.modifiers;
         let mut events = self
@@ -350,15 +445,11 @@ impl SessionView {
         self.send_keys(events);
         if Keyboard::recognizes(key, event.keystroke.key_char.as_deref()) {
             self.consume_key(window, cx);
-            true
-        } else {
-            false
         }
     }
 
     fn handle_key_up(&mut self, event: &KeyUpEvent, window: &mut Window, cx: &mut Context<Self>) {
         let key = event.keystroke.key.as_str();
-        tracing::debug!(key, key_char = ?event.keystroke.key_char, "key up");
         let mods = event.keystroke.modifiers;
         let mut events = self.keys.key_up(key);
         events.extend(
@@ -380,76 +471,120 @@ impl SessionView {
         self.send_keys(events);
     }
 
-    fn toolbar(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_toolbar(&self, fullscreen: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let live = self.phase == Phase::Connected && !self.view_only();
         h_flex()
             .h(theme::toolbar_height())
             .w_full()
             .px_2()
-            .gap_1()
+            .gap_0p5()
             .items_center()
             .bg(theme::toolbar())
             .text_color(theme::toolbar_fg())
-            .child(
-                Button::new("pin")
-                    .ghost()
-                    .icon(if self.pin_toolbar {
-                        IconName::Star
-                    } else {
-                        IconName::Ellipsis
-                    })
-                    .tooltip("Pin / unpin toolbar")
-                    .on_click(cx.listener(|this, _, _, cx| {
-                        this.pin_toolbar = !this.pin_toolbar;
-                        this.toolbar_open = true;
-                        cx.notify();
-                    })),
-            )
+            .child(tool_btn(
+                "pin",
+                if self.pin_toolbar {
+                    IconName::Star
+                } else {
+                    IconName::StarOff
+                },
+                if self.pin_toolbar {
+                    "Unpin toolbar (auto-hide)"
+                } else {
+                    "Pin toolbar"
+                },
+                cx.listener(|this, _, _, cx| {
+                    this.pin_toolbar = !this.pin_toolbar;
+                    this.toolbar_open = this.pin_toolbar;
+                    cx.notify();
+                }),
+            ))
             .child(toolbar_sep())
             .child(tool_btn(
                 "full",
-                IconName::Maximize,
-                "Full screen",
+                if fullscreen {
+                    IconName::Minimize
+                } else {
+                    IconName::Maximize
+                },
+                if fullscreen {
+                    "Exit full screen (⇧⌘F)"
+                } else {
+                    "Full screen (⇧⌘F)"
+                },
                 cx.listener(|this, _, window, cx| this.toggle_fullscreen(window, cx)),
             ))
-            .child(tool_btn(
-                "scale",
-                IconName::Maximize,
-                self.scale.label(),
-                cx.listener(|this, _, _, cx| {
-                    this.scale = this.scale.cycle();
-                    cx.notify();
-                }),
+            .child(
+                Button::new("scale")
+                    .ghost()
+                    .text_color(theme::toolbar_fg())
+                    .icon(IconName::ResizeCorner)
+                    .label(self.scale.label())
+                    .tooltip("Scaling: click to cycle")
+                    .on_click(cx.listener(|this, _, _, cx| {
+                        let next = this.scale.cycle();
+                        this.set_scale(next, cx);
+                    })),
+            )
+            .child(toolbar_sep())
+            .child(
+                tool_btn(
+                    "cad",
+                    IconName::SquareTerminal,
+                    "Send Ctrl+Alt+Del",
+                    cx.listener(|this, _, _, cx| {
+                        this.send_cad();
+                        cx.notify();
+                    }),
+                )
+                .disabled(!live),
+            )
+            .child(key_chip(
+                "Ctrl",
+                cx.listener(|this, _, _, _| this.tap_key(XK_CONTROL_L)),
+            ))
+            .child(key_chip(
+                "Alt",
+                cx.listener(|this, _, _, _| this.tap_key(XK_ALT_L)),
+            ))
+            .child(key_chip(
+                "Win",
+                cx.listener(|this, _, _, _| this.tap_key(rv_core::XK_SUPER_L)),
+            ))
+            .child(key_chip(
+                "Tab",
+                cx.listener(|this, _, _, _| this.tap_key(rv_core::XK_TAB)),
+            ))
+            .child(key_chip(
+                "Esc",
+                cx.listener(|this, _, _, _| this.tap_key(rv_core::XK_ESCAPE)),
             ))
             .child(toolbar_sep())
-            .child(tool_btn(
-                "cad",
-                IconName::SquareTerminal,
-                "Ctrl+Alt+Del",
-                cx.listener(|this, _, _, cx| {
-                    this.send_cad();
-                    cx.notify();
-                }),
-            ))
             .child(
-                Button::new("extra")
-                    .ghost()
-                    .icon(IconName::Asterisk)
-                    .tooltip("Extra keys")
-                    .dropdown_menu(move |menu, _, _| menu.menu("F8 menu", Box::new(SessionMenu))),
+                tool_btn(
+                    "clip",
+                    IconName::Copy,
+                    "Send clipboard to remote",
+                    cx.listener(|this, _, _, cx| {
+                        this.send_clipboard(cx);
+                        cx.notify();
+                    }),
+                )
+                .disabled(!live),
             )
-            .child(tool_btn(
-                "clip",
-                IconName::Copy,
-                "Send clipboard",
-                cx.listener(|this, _, _, cx| {
-                    this.send_clipboard(cx);
-                    cx.notify();
-                }),
-            ))
             .child(div().flex_1())
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::toolbar_muted())
+                    .text_ellipsis()
+                    .max_w(px(260.))
+                    .child(self.status.clone()),
+            )
             .child(
                 Button::new("info")
                     .ghost()
+                    .text_color(theme::toolbar_fg())
                     .icon(IconName::Info)
                     .selected(self.info_open)
                     .tooltip("Connection info")
@@ -462,45 +597,415 @@ impl SessionView {
                 Button::new("disc")
                     .ghost()
                     .icon(IconName::WindowClose)
-                    .text_color(theme::danger())
+                    .text_color(theme::danger(cx))
                     .tooltip("Disconnect")
+                    .disabled(self.phase == Phase::Ended)
                     .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx))),
             )
     }
 
-    fn extra_keys_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        h_flex()
+    /// Auto-hide toolbar: a small handle at the top edge that grows into the
+    /// full toolbar while hovered.
+    fn render_floating_toolbar(
+        &self,
+        fullscreen: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        div()
+            .absolute()
+            .top_0()
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+                div()
+                    .id("float-tb")
+                    .occlude()
+                    .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                        this.toolbar_open = *hovered;
+                        cx.notify();
+                    }))
+                    .child(if self.toolbar_open {
+                        div()
+                            .rounded_b_lg()
+                            .shadow_lg()
+                            .overflow_hidden()
+                            .child(self.render_toolbar(fullscreen, cx))
+                            .into_any_element()
+                    } else {
+                        div()
+                            .px_6()
+                            .py_1()
+                            .rounded_b_md()
+                            .bg(theme::toolbar())
+                            .text_color(theme::toolbar_muted())
+                            .cursor_pointer()
+                            .child(
+                                Icon::new(IconName::ChevronDown)
+                                    .small()
+                                    .text_color(theme::toolbar_muted()),
+                            )
+                            .into_any_element()
+                    }),
+            )
+    }
+
+    fn render_menu(&self, fullscreen: bool, cx: &mut Context<Self>) -> impl IntoElement {
+        let live = self.phase == Phase::Connected && !self.view_only();
+        let scale = self.scale;
+        div()
+            .absolute()
+            .top_3()
+            .left_0()
+            .right_0()
+            .flex()
+            .justify_center()
+            .child(
+                v_flex()
+                    .id("session-menu")
+                    .occlude()
+                    .w(px(280.))
+                    .p_1()
+                    .gap_0p5()
+                    .rounded_lg()
+                    .bg(theme::toolbar())
+                    .border_1()
+                    .border_color(theme::toolbar_line())
+                    .shadow_lg()
+                    .text_color(theme::toolbar_fg())
+                    .child(
+                        h_flex()
+                            .px_2()
+                            .py_1()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::toolbar_muted())
+                                    .child(format!("{} menu", self.menu_key.to_ascii_uppercase())),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::toolbar_muted())
+                                    .child("Esc to close"),
+                            ),
+                    )
+                    .child(menu_item(
+                        "m-full",
+                        if fullscreen {
+                            IconName::Minimize
+                        } else {
+                            IconName::Maximize
+                        },
+                        if fullscreen {
+                            "Exit full screen"
+                        } else {
+                            "Full screen"
+                        },
+                        cx.listener(|this, _, window, cx| {
+                            this.show_menu = false;
+                            this.toggle_fullscreen(window, cx);
+                        }),
+                    ))
+                    .child(
+                        h_flex()
+                            .px_2()
+                            .py_1()
+                            .gap_1()
+                            .items_center()
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .w(px(64.))
+                                    .text_color(theme::toolbar_muted())
+                                    .child("Scaling"),
+                            )
+                            .children([ScaleMode::Fit, ScaleMode::Actual, ScaleMode::Stretch].map(
+                                |mode| {
+                                    Button::new(SharedString::from(format!("m-scale-{mode:?}")))
+                                        .xsmall()
+                                        .when(scale == mode, |b| b.primary())
+                                        .when(scale != mode, |b| {
+                                            b.ghost().text_color(theme::toolbar_fg())
+                                        })
+                                        .label(mode.label())
+                                        .on_click(cx.listener(move |this, _, _, cx| {
+                                            this.set_scale(mode, cx);
+                                        }))
+                                },
+                            )),
+                    )
+                    .child(
+                        menu_item(
+                            "m-cad",
+                            IconName::SquareTerminal,
+                            "Send Ctrl+Alt+Del",
+                            cx.listener(|this, _, _, cx| {
+                                this.show_menu = false;
+                                this.send_cad();
+                                cx.notify();
+                            }),
+                        )
+                        .disabled(!live),
+                    )
+                    .child(
+                        menu_item(
+                            "m-clip",
+                            IconName::Copy,
+                            "Send clipboard",
+                            cx.listener(|this, _, _, cx| {
+                                this.show_menu = false;
+                                this.send_clipboard(cx);
+                                cx.notify();
+                            }),
+                        )
+                        .disabled(!live),
+                    )
+                    .child(menu_item(
+                        "m-info",
+                        IconName::Info,
+                        if self.info_open {
+                            "Hide connection info"
+                        } else {
+                            "Connection info"
+                        },
+                        cx.listener(|this, _, _, cx| {
+                            this.show_menu = false;
+                            this.info_open = !this.info_open;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(menu_item(
+                        "m-pin",
+                        if self.pin_toolbar {
+                            IconName::StarOff
+                        } else {
+                            IconName::Star
+                        },
+                        if self.pin_toolbar {
+                            "Auto-hide toolbar"
+                        } else {
+                            "Pin toolbar"
+                        },
+                        cx.listener(|this, _, _, cx| {
+                            this.show_menu = false;
+                            this.pin_toolbar = !this.pin_toolbar;
+                            this.toolbar_open = this.pin_toolbar;
+                            cx.notify();
+                        }),
+                    ))
+                    .child(div().h(px(1.)).my_1().bg(theme::toolbar_line()))
+                    .child(if self.phase == Phase::Ended {
+                        menu_item(
+                            "m-close",
+                            IconName::WindowClose,
+                            "Close window",
+                            cx.listener(|this, _, window, cx| this.close_window(window, cx)),
+                        )
+                    } else {
+                        menu_item(
+                            "m-disc",
+                            IconName::WindowClose,
+                            "Disconnect",
+                            cx.listener(|this, _, _, cx| {
+                                this.show_menu = false;
+                                this.disconnect(cx);
+                            }),
+                        )
+                        .text_color(theme::danger(cx))
+                    }),
+            )
+    }
+
+    fn render_info(&self) -> impl IntoElement {
+        let rows: Vec<(&str, String)> = vec![
+            ("Server", self.host()),
+            (
+                "Desktop",
+                if self.fb_w > 0 {
+                    format!("{}×{}", self.fb_w, self.fb_h)
+                } else {
+                    "—".into()
+                },
+            ),
+            ("Scaling", self.scale.label().into()),
+            ("Encryption", self.req.encryption.label().into()),
+            ("Quality", self.req.quality.label().into()),
+            (
+                "Access",
+                if self.view_only() {
+                    "View only".into()
+                } else {
+                    "Full control".into()
+                },
+            ),
+        ];
+        v_flex()
+            .id("session-info")
+            .occlude()
+            .absolute()
+            .top_3()
+            .right_3()
+            .p_3()
             .gap_1()
-            .px_2()
-            .py_1()
+            .rounded_md()
             .bg(theme::toolbar())
-            .child(chip(
-                "Ctrl",
-                cx.listener(|this, _, _, _| this.extra_key(XK_CONTROL_L)),
-            ))
-            .child(chip(
-                "Alt",
-                cx.listener(|this, _, _, _| this.extra_key(XK_ALT_L)),
-            ))
-            .child(chip(
-                "Win",
-                cx.listener(|this, _, _, _| this.extra_key(rv_core::XK_SUPER_L)),
-            ))
-            .child(chip(
-                "Tab",
-                cx.listener(|this, _, _, _| this.extra_key(rv_core::XK_TAB)),
-            ))
-            .child(chip(
-                "Esc",
-                cx.listener(|this, _, _, _| this.extra_key(rv_core::XK_ESCAPE)),
-            ))
-            .child(chip(
-                "CAD",
-                cx.listener(|this, _, _, cx| {
-                    this.send_cad();
-                    cx.notify();
-                }),
-            ))
+            .border_1()
+            .border_color(theme::toolbar_line())
+            .shadow_lg()
+            .text_color(theme::toolbar_fg())
+            .children(rows.into_iter().map(|(k, v)| {
+                h_flex()
+                    .gap_3()
+                    .text_xs()
+                    .child(div().w(px(70.)).text_color(theme::toolbar_muted()).child(k))
+                    .child(div().child(v))
+            }))
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(theme::toolbar_muted())
+                    .mt_1()
+                    .child(format!(
+                        "{} for the session menu",
+                        self.menu_key.to_ascii_uppercase()
+                    )),
+            )
+    }
+
+    fn render_ended(&self, cx: &mut Context<Self>) -> impl IntoElement {
+        let failed = self.error.is_some();
+        div()
+            .id("session-ended")
+            .occlude()
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .bg(theme::scrim())
+            .child(
+                v_flex()
+                    .w(px(380.))
+                    .gap_3()
+                    .p_5()
+                    .rounded_lg()
+                    .bg(theme::card(cx))
+                    .border_1()
+                    .border_color(theme::line(cx))
+                    .shadow_lg()
+                    .text_color(theme::ink(cx))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .items_center()
+                            .child(
+                                Icon::new(if failed {
+                                    IconName::TriangleAlert
+                                } else {
+                                    IconName::CircleCheck
+                                })
+                                .text_color(if failed {
+                                    theme::danger(cx)
+                                } else {
+                                    theme::muted(cx)
+                                }),
+                            )
+                            .child(div().text_lg().font_semibold().child(if failed {
+                                "Connection failed"
+                            } else {
+                                "Disconnected"
+                            })),
+                    )
+                    .child(div().text_sm().text_color(theme::muted(cx)).child(
+                        self.error.clone().unwrap_or_else(|| {
+                            format!("The session with {} has ended.", self.host()).into()
+                        }),
+                    ))
+                    .child(
+                        h_flex()
+                            .justify_end()
+                            .gap_2()
+                            .mt_1()
+                            .child(Button::new("ended-close").label("Close").on_click(
+                                cx.listener(|this, _, window, cx| this.close_window(window, cx)),
+                            ))
+                            .child(
+                                Button::new("ended-retry")
+                                    .primary()
+                                    .icon(IconName::Replace)
+                                    .label("Reconnect")
+                                    .on_click(cx.listener(|this, _, _, cx| this.reconnect(cx))),
+                            ),
+                    ),
+            )
+    }
+
+    fn render_picture(&self) -> AnyElement {
+        let Some(image) = self.render_image.clone() else {
+            return v_flex()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .child(
+                    Icon::new(IconName::Loader)
+                        .size_10()
+                        .text_color(theme::toolbar_muted()),
+                )
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(theme::toolbar_muted())
+                        .child(self.status.clone()),
+                )
+                .into_any_element();
+        };
+        let probe = {
+            let cell = self.image_box.clone();
+            canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {})
+                .absolute()
+                .inset_0()
+        };
+        match self.scale {
+            ScaleMode::Fit | ScaleMode::Stretch => div()
+                .relative()
+                .size_full()
+                .child(img(image).id("fb").size_full().object_fit(
+                    if self.scale == ScaleMode::Fit {
+                        ObjectFit::Contain
+                    } else {
+                        ObjectFit::Fill
+                    },
+                ))
+                .child(probe)
+                .into_any_element(),
+            ScaleMode::Actual => div()
+                .id("fb-scroll")
+                .size_full()
+                .overflow_scroll()
+                .child(
+                    // Centered when smaller than the viewport, scrollable when larger.
+                    div()
+                        .min_w_full()
+                        .min_h_full()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .child(
+                            div()
+                                .relative()
+                                .flex_shrink_0()
+                                .w(px(f32::from(self.fb_w)))
+                                .h(px(f32::from(self.fb_h)))
+                                .child(img(image).id("fb").size_full().object_fit(ObjectFit::Fill))
+                                .child(probe),
+                        ),
+                )
+                .into_any_element(),
+        }
     }
 }
 
@@ -510,21 +1015,19 @@ impl Focusable for SessionView {
     }
 }
 
+impl Drop for SessionView {
+    fn drop(&mut self) {
+        // Window closed mid-session: keep the last picture as the preview.
+        if self.phase == Phase::Connected {
+            self.save_thumb();
+        }
+    }
+}
+
 impl Render for SessionView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let image = self.render_image.clone();
-        let object_fit = match self.scale {
-            ScaleMode::Fit => ObjectFit::Contain,
-            ScaleMode::Stretch => ObjectFit::Fill,
-            ScaleMode::Actual => ObjectFit::None,
-        };
-        let info = format!(
-            "{}  {}×{}  {}",
-            self.host,
-            self.fb_w,
-            self.fb_h,
-            self.scale.label()
-        );
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let fullscreen = window.is_fullscreen();
+        let show_pinned = self.pin_toolbar;
 
         v_flex()
             .size_full()
@@ -544,273 +1047,155 @@ impl Render for SessionView {
                 .w(px(0.))
                 .h(px(0.))
             })
-            .on_key_down(cx.listener(|this, ev, window, cx| {
-                this.handle_key(ev, window, cx);
-            }))
+            .on_key_down(cx.listener(|this, ev, window, cx| this.handle_key(ev, window, cx)))
             .on_key_up(cx.listener(|this, ev, window, cx| this.handle_key_up(ev, window, cx)))
             .on_modifiers_changed(cx.listener(|this, ev, _, _| this.handle_modifiers(ev)))
             .on_action(cx.listener(|this, _: &SessionFullscreen, window, cx| {
                 this.toggle_fullscreen(window, cx);
             }))
-            .on_action(cx.listener(|this, _: &SessionDisconnect, _, cx| {
-                this.disconnect(cx);
+            .on_action(cx.listener(|this, _: &SessionDisconnect, _, cx| this.disconnect(cx)))
+            .on_action(cx.listener(|this, _: &SessionClose, window, cx| {
+                this.close_window(window, cx);
             }))
             .on_action(cx.listener(|this, _: &SessionCad, _, cx| {
                 this.send_cad();
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SessionScaleCycle, _, cx| {
-                this.scale = this.scale.cycle();
+                let next = this.scale.cycle();
+                this.set_scale(next, cx);
+            }))
+            .on_action(cx.listener(|this, _: &SessionToggleToolbar, _, cx| {
+                this.pin_toolbar = !this.pin_toolbar;
+                this.toolbar_open = this.pin_toolbar;
                 cx.notify();
             }))
             .on_action(cx.listener(|this, _: &SessionMenu, _, cx| {
                 this.show_menu = !this.show_menu;
                 cx.notify();
             }))
-            .child(
-                TitleBar::new().child(
-                    h_flex()
-                        .w_full()
-                        .px_2()
-                        .items_center()
-                        .justify_between()
-                        .child(
-                            div()
-                                .font_semibold()
-                                .text_color(theme::ink())
-                                .child(self.title.clone()),
-                        )
-                        .child(
-                            div()
-                                .text_xs()
-                                .text_color(theme::muted())
-                                .child(self.status.clone()),
-                        ),
-                ),
-            )
-            .when(self.pin_toolbar && self.toolbar_open, |this| {
-                this.child(self.toolbar(cx)).child(self.extra_keys_bar(cx))
+            .when(!fullscreen, |this| {
+                this.child(
+                    TitleBar::new().child(
+                        h_flex()
+                            .w_full()
+                            .px_2()
+                            .items_center()
+                            .justify_between()
+                            .child(
+                                div()
+                                    .font_semibold()
+                                    .text_color(theme::ink(cx))
+                                    .text_ellipsis()
+                                    .child(self.title.clone()),
+                            )
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(theme::muted(cx))
+                                    .child(self.host()),
+                            ),
+                    ),
+                )
+            })
+            .when(show_pinned, |this| {
+                this.child(self.render_toolbar(fullscreen, cx))
             })
             .child(
                 div()
-                    .id("vnc-canvas")
+                    .id("stage")
                     .flex_1()
+                    .min_h_0()
                     .relative()
                     .overflow_hidden()
-                    .bg(theme::desktop())
-                    .cursor(CursorStyle::Arrow)
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(|this, ev: &MouseDownEvent, window, cx| {
-                            this.focus.focus(window, cx);
-                            this.buttons |= 1;
-                            if let Some((x, y)) = this.map_pointer(ev, window) {
-                                this.send_pointer(x, y);
-                            }
-                        }),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        cx.listener(|this, ev: &MouseUpEvent, window, _| {
-                            this.buttons &= !1;
-                            if let Some((x, y)) = this.map_pointer(ev, window) {
-                                this.send_pointer(x, y);
-                            }
-                        }),
-                    )
-                    .on_mouse_down(
-                        MouseButton::Right,
-                        cx.listener(|this, ev: &MouseDownEvent, window, cx| {
-                            this.focus.focus(window, cx);
-                            this.buttons |= 4;
-                            if let Some((x, y)) = this.map_pointer(ev, window) {
-                                this.send_pointer(x, y);
-                            }
-                        }),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Right,
-                        cx.listener(|this, ev: &MouseUpEvent, window, _| {
-                            this.buttons &= !4;
-                            if let Some((x, y)) = this.map_pointer(ev, window) {
-                                this.send_pointer(x, y);
-                            }
-                        }),
-                    )
-                    .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, _| {
-                        if let Some((x, y)) = this.map_pointer(ev, window) {
-                            this.send_pointer(x, y);
-                        }
-                    }))
-                    .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, window, _| {
-                        let delta = ev.delta.pixel_delta(px(16.));
-                        let bit = if f32::from(delta.y) < 0.0 { 16u8 } else { 8u8 };
-                        this.buttons |= bit;
-                        if let Some((x, y)) = this.map_pointer(ev, window) {
-                            this.send_pointer(x, y);
-                            this.buttons &= !bit;
-                            this.send_pointer(x, y);
-                        } else {
-                            this.buttons &= !bit;
-                        }
-                    }))
                     .child(
                         div()
+                            .id("vnc-canvas")
                             .size_full()
-                            .flex()
-                            .items_center()
-                            .justify_center()
-                            .child(if let Some(img_src) = image {
-                                img(img_src)
-                                    .id("fb")
-                                    .object_fit(object_fit)
-                                    .when(self.scale == ScaleMode::Actual, |this| this)
-                                    .size_full()
-                                    .into_any_element()
-                            } else {
-                                v_flex()
-                                    .gap_2()
-                                    .items_center()
-                                    .child(
-                                        Icon::new(IconName::Frame)
-                                            .size_10()
-                                            .text_color(theme::muted()),
-                                    )
-                                    .child(div().text_sm().child(self.status.clone()))
-                                    .into_any_element()
-                            }),
-                    )
-                    .when(self.error.is_some(), |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .inset_0()
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .bg(hsla(0., 0., 0., 0.55))
-                                .child(
-                                    v_flex()
-                                        .gap_2()
-                                        .p_4()
-                                        .rounded_lg()
-                                        .bg(theme::card())
-                                        .text_color(theme::ink())
-                                        .child(
-                                            div()
-                                                .font_semibold()
-                                                .text_color(theme::danger())
-                                                .child("Connection failed"),
-                                        )
-                                        .child(div().child(self.error.clone().unwrap_or_default())),
-                                ),
-                        )
-                    })
-                    .when(self.info_open, |this| {
-                        this.child(
-                            div()
-                                .absolute()
-                                .top_2()
-                                .right_2()
-                                .p_3()
-                                .rounded_md()
-                                .bg(theme::toolbar())
-                                .child(div().text_xs().child(info.clone())),
-                        )
-                    })
-                    .when(!self.pin_toolbar, |this| {
-                        this.child(div().absolute().top_2().left_1_2().child(
-                            Button::new("float-tb").primary().label("Toolbar").on_click(
-                                cx.listener(|this, _, _, cx| {
-                                    this.pin_toolbar = true;
-                                    this.toolbar_open = true;
-                                    cx.notify();
+                            .bg(theme::desktop())
+                            .cursor(CursorStyle::Arrow)
+                            .on_mouse_down(
+                                MouseButton::Left,
+                                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                                    this.focus.focus(window, cx);
+                                    if this.show_menu {
+                                        this.show_menu = false;
+                                        cx.notify();
+                                    }
+                                    this.button(BTN_LEFT, true, ev.position);
                                 }),
-                            ),
-                        ))
+                            )
+                            .on_mouse_up(
+                                MouseButton::Left,
+                                cx.listener(|this, ev: &MouseUpEvent, _, _| {
+                                    this.button(BTN_LEFT, false, ev.position);
+                                }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Middle,
+                                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                                    this.focus.focus(window, cx);
+                                    this.button(BTN_MIDDLE, true, ev.position);
+                                }),
+                            )
+                            .on_mouse_up(
+                                MouseButton::Middle,
+                                cx.listener(|this, ev: &MouseUpEvent, _, _| {
+                                    this.button(BTN_MIDDLE, false, ev.position);
+                                }),
+                            )
+                            .on_mouse_down(
+                                MouseButton::Right,
+                                cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                                    this.focus.focus(window, cx);
+                                    this.button(BTN_RIGHT, true, ev.position);
+                                }),
+                            )
+                            .on_mouse_up(
+                                MouseButton::Right,
+                                cx.listener(|this, ev: &MouseUpEvent, _, _| {
+                                    this.button(BTN_RIGHT, false, ev.position);
+                                }),
+                            )
+                            .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, _| {
+                                this.pointer_at(ev.position);
+                            }))
+                            .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, _| {
+                                this.wheel(ev);
+                            }))
+                            .child(self.render_picture()),
+                    )
+                    .when(!show_pinned && self.phase != Phase::Ended, |this| {
+                        this.child(self.render_floating_toolbar(fullscreen, cx))
+                    })
+                    .when(self.info_open, |this| this.child(self.render_info()))
+                    .when(self.show_menu, |this| {
+                        this.child(self.render_menu(fullscreen, cx))
+                    })
+                    .when(self.phase == Phase::Ended, |this| {
+                        this.child(self.render_ended(cx))
                     }),
             )
-            .when(self.show_menu, |this| {
-                this.child(
-                    h_flex()
-                        .px_3()
-                        .py_2()
-                        .gap_2()
-                        .bg(theme::toolbar())
-                        .child(div().text_xs().child("F8 menu"))
-                        .child(
-                            Button::new("m-full")
-                                .xsmall()
-                                .label("Full screen")
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.toggle_fullscreen(window, cx)
-                                })),
-                        )
-                        .child(
-                            Button::new("m-scale")
-                                .xsmall()
-                                .label(self.scale.label())
-                                .on_click(cx.listener(|this, _, _, cx| {
-                                    this.scale = this.scale.cycle();
-                                    cx.notify();
-                                })),
-                        )
-                        .child(
-                            Button::new("m-cad")
-                                .xsmall()
-                                .label("Ctrl+Alt+Del")
-                                .on_click(cx.listener(|this, _, _, _cx| this.send_cad())),
-                        )
-                        .child(
-                            Button::new("m-disc")
-                                .xsmall()
-                                .danger()
-                                .label("Disconnect")
-                                .on_click(cx.listener(|this, _, _, cx| this.disconnect(cx))),
-                        ),
-                )
-            })
     }
 }
 
-trait MouseEventLike {
-    fn position(&self) -> Point<Pixels>;
-}
-
-impl MouseEventLike for MouseDownEvent {
-    fn position(&self) -> Point<Pixels> {
-        self.position
-    }
-}
-impl MouseEventLike for MouseUpEvent {
-    fn position(&self) -> Point<Pixels> {
-        self.position
-    }
-}
-impl MouseEventLike for MouseMoveEvent {
-    fn position(&self) -> Point<Pixels> {
-        self.position
-    }
-}
-impl MouseEventLike for ScrollWheelEvent {
-    fn position(&self) -> Point<Pixels> {
-        self.position
-    }
-}
-
+/// Map a point inside the picture box to framebuffer coordinates.
+///
+/// `box_w`/`box_h` is the element the picture is drawn in; for Fit the image
+/// is letterboxed inside it, for Stretch and 1:1 it fills it.
 fn map_to_fb(
     local_x: f32,
     local_y: f32,
-    view_w: f32,
-    view_h: f32,
+    box_w: f32,
+    box_h: f32,
     fb_w: u16,
     fb_h: u16,
     mode: ScaleMode,
 ) -> Option<(u16, u16)> {
-    if fb_w == 0 || fb_h == 0 || view_w <= 1.0 || view_h <= 1.0 {
+    if fb_w == 0 || fb_h == 0 || box_w < 1.0 || box_h < 1.0 {
         return None;
     }
-    let (dx, dy, dw, dh) = dest_rect(view_w, view_h, fb_w, fb_h, mode);
+    let (dx, dy, dw, dh) = dest_rect(box_w, box_h, fb_w, fb_h, mode);
     if local_x < dx || local_y < dy || local_x >= dx + dw || local_y >= dy + dh {
         return None;
     }
@@ -823,30 +1208,26 @@ fn map_to_fb(
 }
 
 fn dest_rect(
-    view_w: f32,
-    view_h: f32,
+    box_w: f32,
+    box_h: f32,
     fb_w: u16,
     fb_h: u16,
     mode: ScaleMode,
 ) -> (f32, f32, f32, f32) {
     match mode {
-        ScaleMode::Stretch => (0.0, 0.0, view_w, view_h),
-        ScaleMode::Actual => {
-            let dw = fb_w as f32;
-            let dh = fb_h as f32;
-            ((view_w - dw) * 0.5, (view_h - dh) * 0.5, dw, dh)
-        }
+        // Stretch fills the box; in 1:1 mode the box *is* the picture.
+        ScaleMode::Stretch | ScaleMode::Actual => (0.0, 0.0, box_w, box_h),
         ScaleMode::Fit => {
-            let scale = (view_w / fb_w as f32).min(view_h / fb_h as f32);
+            let scale = (box_w / fb_w as f32).min(box_h / fb_h as f32);
             let dw = fb_w as f32 * scale;
             let dh = fb_h as f32 * scale;
-            ((view_w - dw) * 0.5, (view_h - dh) * 0.5, dw, dh)
+            ((box_w - dw) * 0.5, (box_h - dh) * 0.5, dw, dh)
         }
     }
 }
 
 fn toolbar_sep() -> impl IntoElement {
-    div().w(px(1.)).h(px(18.)).bg(hsla(0., 0., 1., 0.12))
+    div().w(px(1.)).h(px(18.)).mx_1().bg(theme::toolbar_line())
 }
 
 fn tool_btn(
@@ -854,21 +1235,43 @@ fn tool_btn(
     icon: IconName,
     tip: impl Into<SharedString>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
-) -> impl IntoElement {
+) -> Button {
     Button::new(id)
         .ghost()
         .icon(icon)
+        // The toolbar is always dark; the ghost variant would otherwise use
+        // the theme foreground, which is near-black in light mode.
+        .text_color(theme::toolbar_fg())
         .tooltip(tip)
         .on_click(on_click)
 }
 
-fn chip(
+fn key_chip(
     label: &'static str,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
 ) -> impl IntoElement {
     Button::new(label)
         .xsmall()
         .ghost()
+        .text_color(theme::toolbar_fg())
+        .label(label)
+        .tooltip(format!("Send {label}"))
+        .on_click(on_click)
+}
+
+fn menu_item(
+    id: &'static str,
+    icon: IconName,
+    label: impl Into<SharedString>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+) -> Button {
+    Button::new(id)
+        .ghost()
+        .small()
+        .w_full()
+        .justify_start()
+        .text_color(theme::toolbar_fg())
+        .icon(icon)
         .label(label)
         .on_click(on_click)
 }
@@ -995,4 +1398,59 @@ mod macos_ime {
 #[cfg(not(target_os = "macos"))]
 mod macos_ime {
     pub fn disable(_window: &gpui::Window) {}
+}
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: the `gpui::*` glob would shadow `#[test]`.
+    use super::{ScaleMode, map_to_fb};
+
+    #[test]
+    fn fit_letterboxes_and_maps_corners() {
+        // 200×100 picture in a 400×400 box scales ×2: drawn at y 100..300, x 0..400.
+        assert_eq!(
+            map_to_fb(0.0, 100.0, 400.0, 400.0, 200, 100, ScaleMode::Fit),
+            Some((0, 0))
+        );
+        assert_eq!(
+            map_to_fb(399.0, 299.0, 400.0, 400.0, 200, 100, ScaleMode::Fit),
+            Some((199, 99))
+        );
+        assert_eq!(
+            map_to_fb(200.0, 200.0, 400.0, 400.0, 200, 100, ScaleMode::Fit),
+            Some((100, 50))
+        );
+        assert_eq!(
+            map_to_fb(10.0, 10.0, 400.0, 400.0, 200, 100, ScaleMode::Fit),
+            None
+        );
+    }
+
+    #[test]
+    fn actual_maps_one_to_one() {
+        assert_eq!(
+            map_to_fb(17.0, 23.0, 200.0, 100.0, 200, 100, ScaleMode::Actual),
+            Some((17, 23))
+        );
+        assert_eq!(
+            map_to_fb(200.0, 0.0, 200.0, 100.0, 200, 100, ScaleMode::Actual),
+            None
+        );
+    }
+
+    #[test]
+    fn stretch_scales_each_axis() {
+        assert_eq!(
+            map_to_fb(200.0, 200.0, 400.0, 400.0, 200, 100, ScaleMode::Stretch),
+            Some((100, 50))
+        );
+    }
+
+    #[test]
+    fn empty_framebuffer_maps_nothing() {
+        assert_eq!(
+            map_to_fb(1.0, 1.0, 100.0, 100.0, 0, 0, ScaleMode::Fit),
+            None
+        );
+    }
 }

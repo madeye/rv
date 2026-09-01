@@ -16,7 +16,13 @@ pub enum SessionError {
 
 impl From<vnc::VncError> for SessionError {
     fn from(e: vnc::VncError) -> Self {
-        Self::Vnc(e.to_string())
+        match e {
+            // vnc-rs reports a dropped socket as "client isn't started".
+            vnc::VncError::ClientNotRunning => {
+                Self::Message("The server closed the connection".into())
+            }
+            e => Self::Vnc(e.to_string()),
+        }
     }
 }
 

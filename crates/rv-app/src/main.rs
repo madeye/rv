@@ -27,13 +27,21 @@ fn main() {
             KeyBinding::new("ctrl-f", FocusSearch, Some("AddressBook")),
             KeyBinding::new("cmd-l", ToggleViewMode, Some("AddressBook")),
             KeyBinding::new("ctrl-l", ToggleViewMode, Some("AddressBook")),
-            KeyBinding::new("cmd-comma", OpenPreferences, Some("AddressBook")),
-            KeyBinding::new("ctrl-comma", OpenPreferences, Some("AddressBook")),
+            KeyBinding::new("cmd-i", OpenProperties, Some("AddressBook")),
+            KeyBinding::new("ctrl-i", OpenProperties, Some("AddressBook")),
+            KeyBinding::new("cmd-d", DuplicateSelected, Some("AddressBook")),
+            KeyBinding::new("ctrl-d", DuplicateSelected, Some("AddressBook")),
+            KeyBinding::new("cmd-b", ToggleSidebar, Some("AddressBook")),
+            KeyBinding::new("ctrl-b", ToggleSidebar, Some("AddressBook")),
+            KeyBinding::new("cmd-,", OpenPreferences, Some("AddressBook")),
+            KeyBinding::new("ctrl-,", OpenPreferences, Some("AddressBook")),
             KeyBinding::new("enter", ConnectSelected, Some("AddressBook")),
+            KeyBinding::new("escape", CloseModal, Some("AddressBook")),
             KeyBinding::new("delete", DeleteSelected, Some("AddressBook")),
             KeyBinding::new("cmd-backspace", DeleteSelected, Some("AddressBook")),
             KeyBinding::new("cmd-q", QuitApp, None),
             KeyBinding::new("cmd-shift-f", SessionFullscreen, Some("Session")),
+            KeyBinding::new("cmd-w", SessionClose, Some("Session")),
             KeyBinding::new("f8", SessionMenu, Some("Session")),
         ]);
 
@@ -43,15 +51,7 @@ fn main() {
         options.window_min_size = Some(size(px(800.), px(520.)));
         options.app_id = Some("app.rv.viewer".into());
 
-        let connect_to = std::env::args()
-            .nth(1)
-            .filter(|a| !a.starts_with('-'))
-            .or_else(|| {
-                std::env::args()
-                    .skip(1)
-                    .skip_while(|a| a != "--connect")
-                    .nth(1)
-            });
+        let connect_to = connect_target(std::env::args().skip(1));
 
         cx.spawn(async move |cx| {
             cx.open_window(options, |window, cx| {
@@ -69,4 +69,17 @@ fn main() {
         })
         .detach();
     });
+}
+
+/// `rv host[:display]` or `rv --connect host[:display]`.
+fn connect_target(mut args: impl Iterator<Item = String>) -> Option<String> {
+    while let Some(arg) = args.next() {
+        if arg == "--connect" {
+            return args.next();
+        }
+        if !arg.starts_with('-') {
+            return Some(arg);
+        }
+    }
+    None
 }

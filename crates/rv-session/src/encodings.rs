@@ -13,7 +13,8 @@ pub fn encodings_for(quality: QualityPreset) -> Vec<VncEncoding> {
         ],
     };
     list.push(VncEncoding::DesktopSizePseudo);
-    list.push(VncEncoding::CursorPseudo);
+    // No `CursorPseudo`: the compositor has no local cursor layer, so the
+    // server must keep drawing the pointer into the framebuffer itself.
     list.push(VncEncoding::Raw);
     list
 }
@@ -32,6 +33,7 @@ mod tests {
             let e = encodings_for(q);
             assert!(e.contains(&VncEncoding::Raw));
             assert!(e.contains(&VncEncoding::DesktopSizePseudo));
+            assert!(!e.contains(&VncEncoding::CursorPseudo));
         }
     }
 }

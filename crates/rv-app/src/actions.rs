@@ -12,6 +12,7 @@ actions!(
         ToggleViewMode,
         ToggleSidebar,
         FocusSearch,
+        CloseModal,
         QuitApp,
         SessionFullscreen,
         SessionScaleCycle,
@@ -19,5 +20,6 @@ actions!(
         SessionDisconnect,
         SessionToggleToolbar,
         SessionMenu,
+        SessionClose,
     ]
 );

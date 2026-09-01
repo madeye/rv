@@ -210,7 +210,16 @@ impl ConnectRequest {
     }
 }
 
-/// Parse `host`, `host:port`, or `[ipv6]:port`. Default port is 5900.
+/// Default RFB port; `host:N` with `N < 100` is display `N` on top of it.
+pub const DEFAULT_PORT: u16 = 5900;
+
+/// Parse a VNC server address the way classic viewers do.
+///
+/// * `host` → port 5900
+/// * `host:N` with `N < 100` → display number, port `5900 + N`
+/// * `host:port` (≥ 100) → that port
+/// * `host::port` → that port, even if below 100
+/// * `[ipv6]`, `[ipv6]:N`, `[ipv6]::port`, or a bare IPv6 literal
 pub fn parse_server(input: &str) -> Result<(String, u16), String> {
     let trimmed = input.trim();
     if trimmed.is_empty() {
@@ -223,37 +232,40 @@ pub fn parse_server(input: &str) -> Result<(String, u16), String> {
         if host.is_empty() {
             return Err("Invalid IPv6 address".into());
         }
-        let port = match tail.strip_prefix(':') {
-            Some(p) if !p.is_empty() => parse_port(p)?,
-            Some(_) => return Err("Invalid port".into()),
-            None if tail.is_empty() => 5900,
-            None => return Err("Invalid IPv6 address".into()),
-        };
+        if tail.is_empty() {
+            return Ok((host.to_string(), DEFAULT_PORT));
+        }
+        let port = tail
+            .strip_prefix(':')
+            .ok_or_else(|| "Invalid IPv6 address".to_string())
+            .and_then(parse_port_suffix)?;
         return Ok((host.to_string(), port));
     }
-    if let Some((host, port)) = trimmed.rsplit_once(':') {
-        if host.contains(':') {
-            // Bare IPv6 without brackets.
-            return Ok((trimmed.to_string(), 5900));
+    if let Some((host, suffix)) = trimmed.split_once(':') {
+        if suffix.contains(':') && !suffix.starts_with(':') {
+            // Bare IPv6 literal such as `2001:db8::1`.
+            return Ok((trimmed.to_string(), DEFAULT_PORT));
         }
         if host.is_empty() {
             return Err("Enter a VNC server host".into());
         }
-        return Ok((host.to_string(), parse_port(port)?));
+        return Ok((host.to_string(), parse_port_suffix(suffix)?));
     }
-    Ok((trimmed.to_string(), 5900))
+    Ok((trimmed.to_string(), DEFAULT_PORT))
+}
+
+/// `suffix` is everything after the first `:`: `N`, `port`, or `:port`.
+fn parse_port_suffix(suffix: &str) -> Result<u16, String> {
+    if let Some(explicit) = suffix.strip_prefix(':') {
+        return parse_port(explicit);
+    }
+    let n = parse_port(suffix)?;
+    if n < 100 { Ok(DEFAULT_PORT + n) } else { Ok(n) }
 }
 
 fn parse_port(s: &str) -> Result<u16, String> {
-    s.parse::<u16>()
-        .map_err(|_| "Port must be a number from 1 to 65535".into())
-        .and_then(|p| {
-            if p == 0 {
-                Err("Port must be a number from 1 to 65535".into())
-            } else {
-                Ok(p)
-            }
-        })
+    const MSG: &str = "Port must be a number from 0 to 65535 (or a display number below 100)";
+    s.parse::<u16>().map_err(|_| MSG.into())
 }
 
 #[cfg(test)]
@@ -274,16 +286,58 @@ mod tests {
     }
 
     #[test]
+    fn parse_display_number() {
+        assert_eq!(
+            parse_server("pi.local:1").unwrap(),
+            ("pi.local".into(), 5901)
+        );
+        assert_eq!(
+            parse_server("pi.local:0").unwrap(),
+            ("pi.local".into(), 5900)
+        );
+        assert_eq!(
+            parse_server("pi.local:99").unwrap(),
+            ("pi.local".into(), 5999)
+        );
+        assert_eq!(
+            parse_server("pi.local:100").unwrap(),
+            ("pi.local".into(), 100)
+        );
+    }
+
+    #[test]
+    fn parse_explicit_port() {
+        assert_eq!(parse_server("pi.local::1").unwrap(), ("pi.local".into(), 1));
+        assert_eq!(
+            parse_server("pi.local::5900").unwrap(),
+            ("pi.local".into(), 5900)
+        );
+    }
+
+    #[test]
     fn parse_ipv6() {
         assert_eq!(
             parse_server("[2001:db8::1]:5902").unwrap(),
             ("2001:db8::1".into(), 5902)
         );
+        assert_eq!(parse_server("[::1]").unwrap(), ("::1".into(), 5900));
+        assert_eq!(parse_server("[::1]:2").unwrap(), ("::1".into(), 5902));
+        assert_eq!(parse_server("[::1]::80").unwrap(), ("::1".into(), 80));
+        assert_eq!(
+            parse_server("2001:db8::1").unwrap(),
+            ("2001:db8::1".into(), 5900)
+        );
+        assert!(parse_server("[::1").is_err());
+        assert!(parse_server("[]:5900").is_err());
     }
 
     #[test]
-    fn reject_empty() {
+    fn reject_bad_input() {
         assert!(parse_server("  ").is_err());
+        assert!(parse_server(":5900").is_err());
+        assert!(parse_server("host:").is_err());
+        assert!(parse_server("host:abc").is_err());
+        assert!(parse_server("host:70000").is_err());
     }
 
     #[test]

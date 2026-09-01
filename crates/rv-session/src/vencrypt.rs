@@ -151,12 +151,15 @@ pub async fn handshake(
     Ok((TlsRfbStream::new(tls, auth), auth))
 }
 
+/// Choose the VeNCrypt subtype. X509 variants come first: the plain `TLS*`
+/// subtypes mean anonymous Diffie-Hellman in every common server, which
+/// rustls refuses to negotiate, so they only work as a last resort.
 fn pick_subtype(available: &[u32]) -> Option<(u32, VencryptAuth, bool)> {
     const PREF: [(u32, VencryptAuth, bool); 4] = [
-        (TLS_VNC, VencryptAuth::Vnc, false),
         (X509_VNC, VencryptAuth::Vnc, true),
-        (TLS_NONE, VencryptAuth::None, false),
+        (TLS_VNC, VencryptAuth::Vnc, false),
         (X509_NONE, VencryptAuth::None, true),
+        (TLS_NONE, VencryptAuth::None, false),
     ];
     for (id, auth, x509) in PREF {
         if available.contains(&id) {
@@ -228,5 +231,34 @@ impl rustls::client::danger::ServerCertVerifier for NoVerifier {
         rustls::crypto::ring::default_provider()
             .signature_verification_algorithms
             .supported_schemes()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn prefers_x509_over_anonymous_tls() {
+        let (id, auth, x509) = pick_subtype(&[TLS_VNC, X509_VNC]).unwrap();
+        assert_eq!((id, auth, x509), (X509_VNC, VencryptAuth::Vnc, true));
+        let (id, auth, x509) = pick_subtype(&[TLS_NONE, TLS_VNC]).unwrap();
+        assert_eq!((id, auth, x509), (TLS_VNC, VencryptAuth::Vnc, false));
+        assert!(pick_subtype(&[999]).is_none());
+    }
+
+    #[test]
+    fn prefix_replays_rfb_38_security_list() {
+        let prefix_for = |auth: VencryptAuth| {
+            let mut prefix = b"RFB 003.008\n".to_vec();
+            prefix.push(1);
+            prefix.push(match auth {
+                VencryptAuth::None => 1,
+                VencryptAuth::Vnc => 2,
+            });
+            prefix
+        };
+        assert_eq!(prefix_for(VencryptAuth::Vnc).last(), Some(&2));
+        assert_eq!(prefix_for(VencryptAuth::None).last(), Some(&1));
     }
 }

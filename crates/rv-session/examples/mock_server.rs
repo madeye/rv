@@ -50,7 +50,8 @@ fn read_exact(s: &mut TcpStream, n: usize) -> std::io::Result<Vec<u8>> {
     Ok(buf)
 }
 
-fn frame_rgba(t: f32) -> Vec<u8> {
+/// Frame in the BGRA layout the viewer negotiates.
+fn frame_bgra(t: f32) -> Vec<u8> {
     let (WIDTH, HEIGHT) = size();
     let mut px = vec![0u8; WIDTH as usize * HEIGHT as usize * 4];
     let cx = (WIDTH as f32 * (0.5 + 0.35 * t.sin())) as i32;
@@ -61,15 +62,18 @@ fn frame_rgba(t: f32) -> Vec<u8> {
             let dx = x - cx;
             let dy = y - cy;
             let inside = dx * dx + dy * dy < 48 * 48;
-            if inside {
-                px[i] = 255;
-                px[i + 1] = 210;
-                px[i + 2] = 40;
+            let (r, g, b) = if inside {
+                (255, 210, 40)
             } else {
-                px[i] = (x * 255 / WIDTH as i32) as u8;
-                px[i + 1] = 70;
-                px[i + 2] = (y * 255 / HEIGHT as i32) as u8;
-            }
+                (
+                    (x * 255 / WIDTH as i32) as u8,
+                    70,
+                    (y * 255 / HEIGHT as i32) as u8,
+                )
+            };
+            px[i] = b;
+            px[i + 1] = g;
+            px[i + 2] = r;
             px[i + 3] = 255;
         }
     }
@@ -114,7 +118,7 @@ fn serve(mut sock: TcpStream) -> std::io::Result<()> {
             3 => {
                 let _ = read_exact(&mut sock, 9)?;
                 let t = start.elapsed().as_secs_f32();
-                let pixels = frame_rgba(t);
+                let pixels = frame_bgra(t);
                 let n = rects().clamp(1, HEIGHT);
                 let strip = HEIGHT / n;
                 sock.write_all(&[0, 0])?;
@@ -142,7 +146,17 @@ fn serve(mut sock: TcpStream) -> std::io::Result<()> {
                 );
             }
             5 => {
-                let _ = read_exact(&mut sock, 5)?;
+                let b = read_exact(&mut sock, 5)?;
+                let x = u16::from_be_bytes([b[1], b[2]]);
+                let y = u16::from_be_bytes([b[3], b[4]]);
+                // Only log button transitions; motion would flood the log.
+                if b[0] != 0 {
+                    eprintln!(
+                        "[{}] pointer buttons=0b{:08b} at ({x}, {y})",
+                        now_ms(),
+                        b[0]
+                    );
+                }
             }
             6 => {
                 let _ = read_exact(&mut sock, 3)?;

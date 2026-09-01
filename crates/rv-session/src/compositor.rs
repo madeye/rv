@@ -1,14 +1,18 @@
 use vnc::{Rect, VncEvent};
 
-/// CPU-side RGBA framebuffer composed from RFB rects.
+/// CPU-side framebuffer composed from RFB rects.
+///
+/// Pixels are stored as packed BGRA8 (the format the session negotiates with
+/// the server and the layout GPUI uploads directly), so the UI thread never
+/// has to touch individual bytes: it clones the buffer and hands it to the
+/// renderer.
 #[derive(Debug, Clone, Default)]
 pub struct Framebuffer {
     pub width: u16,
     pub height: u16,
-    /// Packed RGBA8, row-major.
+    /// Packed BGRA8, row-major.
     pub pixels: Vec<u8>,
     pub generation: u64,
-    pub desktop_name: String,
 }
 
 impl Framebuffer {
@@ -26,7 +30,7 @@ impl Framebuffer {
                 Apply::Resized
             }
             VncEvent::RawImage(rect, data) => {
-                self.blit_rgba(&rect, &data);
+                self.blit(&rect, &data);
                 Apply::Dirty
             }
             VncEvent::Copy(dst, src) => {
@@ -40,14 +44,12 @@ impl Framebuffer {
                     Apply::Ignored
                 }
             }
-            VncEvent::SetCursor(rect, data) => {
-                if rect.width != 0 && rect.height != 0 {
-                    self.blit_rgba(&rect, &data);
-                    Apply::Dirty
-                } else {
-                    Apply::Ignored
-                }
-            }
+            // Cursor pseudo-rects carry the hotspot in `x`/`y`, not a screen
+            // position; painting them into the framebuffer draws the cursor
+            // bitmap in the top-left corner. The session does not advertise
+            // the cursor pseudo-encoding, so servers keep rendering the
+            // pointer into ordinary updates and this stays a no-op.
+            VncEvent::SetCursor(..) => Apply::Ignored,
             VncEvent::Text(text) => Apply::Clipboard(text),
             VncEvent::Bell => Apply::Bell,
             VncEvent::Error(e) => Apply::Error(e),
@@ -56,7 +58,8 @@ impl Framebuffer {
         }
     }
 
-    fn blit_rgba(&mut self, rect: &Rect, data: &[u8]) {
+    /// Copy a rect of packed 4-byte pixels (already in framebuffer order) into place.
+    fn blit(&mut self, rect: &Rect, data: &[u8]) {
         if self.width == 0 || self.height == 0 {
             return;
         }
@@ -92,8 +95,9 @@ impl Framebuffer {
     fn blit_jpeg(&mut self, rect: &Rect, data: &[u8]) -> bool {
         match image::load_from_memory_with_format(data, image::ImageFormat::Jpeg) {
             Ok(img) => {
-                let rgba = img.to_rgba8();
-                self.blit_rgba(rect, rgba.as_raw());
+                let mut rgba = img.into_rgba8().into_raw();
+                swap_red_blue(&mut rgba);
+                self.blit(rect, &rgba);
                 true
             }
             Err(_) => false,
@@ -146,8 +150,9 @@ impl Framebuffer {
         if self.width == 0 || self.height == 0 || self.pixels.is_empty() {
             return None;
         }
-        let img =
-            image::RgbaImage::from_raw(self.width as u32, self.height as u32, self.pixels.clone())?;
+        let mut rgba = self.pixels.clone();
+        swap_red_blue(&mut rgba);
+        let img = image::RgbaImage::from_raw(self.width as u32, self.height as u32, rgba)?;
         let img = image::DynamicImage::ImageRgba8(img);
         let thumb = img.thumbnail(max_edge, max_edge);
         let mut out = Vec::new();
@@ -155,6 +160,13 @@ impl Framebuffer {
             .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
             .ok()?;
         Some(out)
+    }
+}
+
+/// Swap channels 0 and 2 of every packed 4-byte pixel (RGBA ⇄ BGRA).
+pub fn swap_red_blue(pixels: &mut [u8]) {
+    for px in pixels.chunks_exact_mut(4) {
+        px.swap(0, 2);
     }
 }
 
@@ -179,7 +191,7 @@ mod tests {
         for px in red.chunks_exact_mut(4) {
             px.copy_from_slice(&[255, 0, 0, 255]);
         }
-        fb.blit_rgba(
+        fb.blit(
             &Rect {
                 x: 0,
                 y: 0,
@@ -204,5 +216,56 @@ mod tests {
             },
         );
         assert_eq!(&fb.pixels[8..12], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn cursor_rect_is_not_painted() {
+        let mut fb = Framebuffer::default();
+        fb.resize(4, 4);
+        let white = vec![255u8; 2 * 2 * 4];
+        let rect = Rect {
+            x: 1,
+            y: 1,
+            width: 2,
+            height: 2,
+        };
+        assert!(matches!(
+            fb.apply(VncEvent::SetCursor(rect, white)),
+            Apply::Ignored
+        ));
+        assert!(fb.pixels.iter().all(|&b| b == 0));
+    }
+
+    #[test]
+    fn oversized_rect_is_clipped() {
+        let mut fb = Framebuffer::default();
+        fb.resize(4, 4);
+        let data = vec![9u8; 3 * 3 * 4];
+        fb.blit(
+            &Rect {
+                x: 2,
+                y: 2,
+                width: 3,
+                height: 3,
+            },
+            &data,
+        );
+        // Only the 2×2 corner inside the framebuffer is written.
+        assert_eq!(fb.pixels[(2 * 4 + 2) * 4], 9);
+        assert_eq!(fb.pixels[(3 * 4 + 3) * 4], 9);
+        assert_eq!(fb.pixels[(1 * 4 + 1) * 4], 0);
+    }
+
+    #[test]
+    fn thumbnail_swaps_back_to_rgba() {
+        let mut fb = Framebuffer::default();
+        fb.resize(2, 2);
+        // BGRA pure red.
+        for px in fb.pixels.chunks_exact_mut(4) {
+            px.copy_from_slice(&[0, 0, 255, 255]);
+        }
+        let png = fb.thumbnail_png(2).unwrap();
+        let img = image::load_from_memory(&png).unwrap().into_rgba8();
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
     }
 }

@@ -30,7 +30,12 @@ pub struct StorePaths {
 }
 
 impl StorePaths {
+    /// Platform data directory, or `$RV_DATA_DIR` when set (handy for
+    /// testing against a scratch address book).
     pub fn default_dir() -> Result<Self, StoreError> {
+        if let Some(dir) = std::env::var_os("RV_DATA_DIR").filter(|d| !d.is_empty()) {
+            return Ok(Self::in_dir(PathBuf::from(dir)));
+        }
         let dirs = directories::ProjectDirs::from("app", "RV", "rv").ok_or_else(|| {
             StoreError::Io(std::io::Error::other("cannot resolve application data dir"))
         })?;
@@ -71,26 +76,34 @@ pub struct AddressBook {
 }
 
 impl AddressBook {
+    /// Load strictly: any unreadable file is an error.
     pub fn load(paths: StorePaths) -> Result<Self, StoreError> {
         paths.ensure()?;
-        let connections = if paths.address_book.exists() {
-            let data = fs::read_to_string(&paths.address_book)?;
-            let file: AddressBookFile = serde_json::from_str(&data)?;
-            file.connections
-        } else {
-            Vec::new()
-        };
-        let prefs = if paths.prefs.exists() {
-            let data = fs::read_to_string(&paths.prefs)?;
-            serde_json::from_str(&data)?
-        } else {
-            Preferences::default()
-        };
+        let file: AddressBookFile = read_json(&paths.address_book)?.unwrap_or_default();
+        let prefs = read_json(&paths.prefs)?.unwrap_or_default();
         Ok(Self {
             paths,
-            connections,
+            connections: file.connections,
             prefs,
         })
+    }
+
+    /// Load, but survive corrupt JSON: the bad file is moved aside as
+    /// `<name>.broken` so nothing is lost, and a warning describes what
+    /// happened. I/O errors (unreadable directory) still fail.
+    pub fn load_or_quarantine(paths: StorePaths) -> Result<(Self, Vec<String>), StoreError> {
+        paths.ensure()?;
+        let mut warnings = Vec::new();
+        let file: AddressBookFile = read_json_or_quarantine(&paths.address_book, &mut warnings)?;
+        let prefs = read_json_or_quarantine(&paths.prefs, &mut warnings)?;
+        Ok((
+            Self {
+                paths,
+                connections: file.connections,
+                prefs,
+            },
+            warnings,
+        ))
     }
 
     pub fn paths(&self) -> &StorePaths {
@@ -237,6 +250,38 @@ pub fn delete_password(id: ConnectionId) -> Result<(), StoreError> {
     }
 }
 
+/// `Ok(None)` when the file does not exist.
+fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, StoreError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let data = fs::read_to_string(path)?;
+    Ok(Some(serde_json::from_str(&data)?))
+}
+
+fn read_json_or_quarantine<T: serde::de::DeserializeOwned + Default>(
+    path: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<T, StoreError> {
+    match read_json(path) {
+        Ok(v) => Ok(v.unwrap_or_default()),
+        Err(StoreError::Json(e)) => {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| path.display().to_string());
+            let aside = path.with_extension("json.broken");
+            fs::rename(path, &aside)?;
+            warnings.push(format!(
+                "{name} was unreadable ({e}) and moved to {}",
+                aside.display()
+            ));
+            Ok(T::default())
+        }
+        Err(e) => Err(e),
+    }
+}
+
 fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), StoreError> {
     let tmp = path.with_extension("json.tmp");
     {
@@ -301,6 +346,21 @@ mod tests {
         assert_eq!(reloaded.labels(), vec!["lab".to_string()]);
         assert_eq!(reloaded.filtered("off", None).len(), 1);
         assert_eq!(reloaded.filtered("", Some("lab")).len(), 1);
+    }
+
+    #[test]
+    fn corrupt_book_is_quarantined() {
+        let guard = tempfile_dir::Guard::new();
+        let paths = StorePaths::in_dir(guard.path().to_path_buf());
+        paths.ensure().unwrap();
+        std::fs::write(&paths.address_book, b"{ not json").unwrap();
+        assert!(AddressBook::load(paths.clone()).is_err());
+
+        let (book, warnings) = AddressBook::load_or_quarantine(paths.clone()).unwrap();
+        assert!(book.connections().is_empty());
+        assert_eq!(warnings.len(), 1);
+        assert!(!paths.address_book.exists());
+        assert!(paths.root.join("addressbook.json.broken").exists());
     }
 
     #[test]

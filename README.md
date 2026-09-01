@@ -4,13 +4,15 @@ A native desktop VNC viewer written in Rust with [GPUI](https://www.gpui.rs/). D
 
 ## Features
 
-- Address book with search, labels, list/grid views, and saved connections
-- Session window with pinned or floating toolbar
-- Mouse, keyboard, Ctrl+Alt+Del / extra keys
-- Fit / 1:1 / stretch scaling and fullscreen
+- Address book with search, labels, list/grid views, desktop previews, and recents
+- Light / dark / system appearance
+- Session window with pinned or auto-hide toolbar, F8 menu, and connection info
+- Fit / 1:1 (scrollable) / stretch scaling and full screen
+- Mouse (left/middle/right, vertical + horizontal wheel), keyboard, Ctrl+Alt+Del and extra keys
+- Reconnect from the disconnect / error overlay
 - Clipboard sync (Latin-1, per RFB)
 - VNC Auth, Tight / ZRLE / TRLE / Raw encodings
-- Optional VeNCrypt TLS (`Prefer on` / `Always`)
+- Optional VeNCrypt TLS (`Prefer on` / `Always`; X509 subtypes preferred)
 - Passwords stored in the OS keychain
 
 ## Build
@@ -19,7 +21,29 @@ A native desktop VNC viewer written in Rust with [GPUI](https://www.gpui.rs/). D
 cargo run -p rv-app --release
 ```
 
-Connect to a local server such as TigerVNC, TightVNC, x11vnc, QEMU, or `rustvncserver` on `127.0.0.1:5900`.
+Connect to a local server such as TigerVNC, TightVNC, x11vnc, QEMU, or `rustvncserver` on `127.0.0.1:5900`, or pass a target on the command line:
+
+```bash
+rv 10.0.0.8          # port 5900
+rv pi.local:1        # display 1 → port 5901 (numbers below 100 are displays)
+rv pi.local::5901    # explicit port
+rv [2001:db8::1]:2   # IPv6
+```
+
+## Keyboard shortcuts
+
+| Address book | | Session | |
+| --- | --- | --- | --- |
+| ⌘N | New connection | F8 | Session menu |
+| ⌘F | Search | ⇧⌘F | Full screen |
+| ⌘L | Toggle list / grid | ⌘W | Close window |
+| ⌘I | Properties | | |
+| ⌘D | Duplicate | | |
+| ⌘B | Toggle sidebar | | |
+| ⌘, | Preferences | | |
+| ↩ / ⌫ | Connect / delete selected | | |
+
+Ctrl / Alt / ⌘ are forwarded to the remote desktop while a session has focus.
 
 ## Tests
 
@@ -28,6 +52,15 @@ cargo fmt --all -- --check
 cargo clippy --all-targets -- -D warnings
 cargo test --workspace
 ```
+
+A mock RFB server for manual testing lives in `crates/rv-session/examples/mock_server.rs`:
+
+```bash
+RV_MOCK_SIZE=1280x800 RV_MOCK_RECTS=8 cargo run -p rv-session --example mock_server 127.0.0.1:5999
+RV_DATA_DIR=/tmp/rv-scratch cargo run -p rv-app -- 127.0.0.1:5999
+```
+
+`RV_DATA_DIR` overrides the address-book location (default: the platform data directory).
 
 ## Layout
 
