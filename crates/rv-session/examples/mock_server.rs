@@ -159,12 +159,8 @@ fn serve(sock: TcpStream) -> std::io::Result<()> {
     sock.write_all(name)?;
 
     let start = Instant::now();
-    loop {
-        let typ = match read_exact(&mut sock, 1) {
-            Ok(b) => b[0],
-            Err(_) => break,
-        };
-        match typ {
+    while let Ok(message) = read_exact(&mut sock, 1) {
+        match message[0] {
             0 => {
                 let _ = read_exact(&mut sock, 3 + 16)?;
             }

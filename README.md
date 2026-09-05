@@ -52,9 +52,13 @@ Ctrl / Alt / ⌘ are forwarded to the remote desktop while a session has focus.
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test --workspace
+cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo test --workspace --locked
 ```
+
+CI runs these checks and builds the app on macOS, Linux, and Windows, each on
+x86_64 and ARM64 native runners. It runs for pull requests and pushes to `main`
+or `master`, and can also be started manually.
 
 A mock RFB server for manual testing lives in `crates/rv-session/examples/mock_server.rs`:
 
