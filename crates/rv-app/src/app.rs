@@ -136,6 +136,16 @@ impl AddressBookApp {
             }
         };
 
+        Self::with_book(book, read_only, status, window, cx)
+    }
+
+    fn with_book(
+        book: AddressBook,
+        read_only: bool,
+        status: SharedString,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         theme::apply(book.prefs().theme, window, cx);
 
         let search = cx.new(|cx| {
@@ -939,12 +949,14 @@ impl AddressBookApp {
                         .mt_1()
                         .child(
                             Button::new("modal-cancel")
+                                .debug_selector(|| "modal-cancel".into())
                                 .disabled(self.credential_busy)
                                 .label("Cancel")
                                 .on_click(cx.listener(|this, _, _, cx| this.close_modal(cx))),
                         )
                         .child(
                             Button::new("modal-save")
+                                .debug_selector(|| "modal-save".into())
                                 .disabled(self.credential_busy)
                                 .outline()
                                 .label("Save")
@@ -954,6 +966,7 @@ impl AddressBookApp {
                         )
                         .child(
                             Button::new("modal-connect")
+                                .debug_selector(|| "modal-connect".into())
                                 .disabled(self.credential_busy)
                                 .primary()
                                 .label("Connect")
@@ -1685,3 +1698,6 @@ mod tests {
         assert_eq!(relative_time(now - 3 * 86_400), "3 d ago");
     }
 }
+
+#[cfg(test)]
+mod ui_tests;

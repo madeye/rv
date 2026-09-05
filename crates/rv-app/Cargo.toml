@@ -32,6 +32,12 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["NSAppl
 objc2-foundation = { version = "0.3", default-features = false, features = ["NSArray", "NSData", "NSString"] }
 raw-window-handle = "0.6"
 
+[dev-dependencies]
+gpui = { git = "https://github.com/zed-industries/zed", features = ["test-support"] }
+rv-session = { workspace = true, features = ["test-support"] }
+tempfile = "3"
+vnc.workspace = true
+
 [package.metadata.bundle]
 name = "RV"
 identifier = "io.github.madeye.rv"

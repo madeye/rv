@@ -60,6 +60,16 @@ CI runs these checks and builds the app on macOS, Linux, and Windows, each on
 x86_64 and ARM64 native runners. It runs for pull requests and pushes to `main`
 or `master`, and can also be started manually.
 
+The UI tests render and dispatch keyboard/mouse events through GPUI's test
+platform, without native windows, a display server, or a GPU. They use temporary
+address books and an in-memory VNC peer, covering form validation and saving,
+busy controls, search, keyboard forwarding, pointer mapping, and cursor restoration.
+Run just these tests with:
+
+```bash
+cargo test -p rv-app --locked offscreen_
+```
+
 A mock RFB server for manual testing lives in `crates/rv-session/examples/mock_server.rs`:
 
 ```bash

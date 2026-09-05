@@ -113,6 +113,17 @@ impl SessionView {
         cx: &mut Context<Self>,
     ) -> Self {
         let handle = SessionHandle::spawn(req.clone());
+        Self::with_handle(req, title, options, handle, window, cx)
+    }
+
+    fn with_handle(
+        req: ConnectRequest,
+        title: String,
+        options: SessionOptions,
+        handle: SessionHandle,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Self {
         let focus = cx.focus_handle();
         focus.focus(window, cx);
         let cursor_subscriptions = vec![
@@ -1437,6 +1448,11 @@ mod local_cursor {
     }
 
     impl LocalCursor {
+        #[cfg(test)]
+        pub(super) fn is_hidden(&self) -> bool {
+            self.hidden
+        }
+
         pub fn set_hidden(&mut self, hidden: bool) {
             if self.hidden != hidden {
                 set_platform_hidden(hidden);
@@ -1494,6 +1510,9 @@ mod local_cursor {
         TRANSITIONS.with_borrow(|transitions| assert_eq!(transitions.len(), 4));
     }
 }
+
+#[cfg(test)]
+mod ui_tests;
 
 #[cfg(target_os = "macos")]
 mod macos_ime {

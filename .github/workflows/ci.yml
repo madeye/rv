@@ -88,8 +88,11 @@ jobs:
       - name: Lint workspace
         run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
-      - name: Test workspace
-        run: cargo test --workspace --locked
+      - name: Unit and doc tests
+        run: cargo test --workspace --locked -- --skip offscreen_
+
+      - name: Offscreen UI tests
+        run: cargo test -p rv-app --locked offscreen_
 
       - name: Build app
         run: cargo build -p rv-app --locked

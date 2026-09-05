@@ -52,7 +52,29 @@ pub struct SessionHandle {
     thread: Option<thread::JoinHandle<()>>,
 }
 
+/// In-memory peer for UI tests; no socket or worker thread is created.
+#[cfg(feature = "test-support")]
+pub struct SessionTestPeer {
+    pub commands: tokio::sync::mpsc::UnboundedReceiver<SessionCommand>,
+    pub events: mpsc::Sender<SessionEvent>,
+}
+
 impl SessionHandle {
+    #[cfg(feature = "test-support")]
+    pub fn test_pair() -> (Self, SessionTestPeer) {
+        let (cmd_tx, commands) = tokio::sync::mpsc::unbounded_channel();
+        let (events, event_rx) = mpsc::channel();
+        (
+            Self {
+                framebuffer: Arc::new(Mutex::new(Framebuffer::default())),
+                cmd_tx,
+                event_rx: Mutex::new(event_rx),
+                thread: None,
+            },
+            SessionTestPeer { commands, events },
+        )
+    }
+
     pub fn spawn(request: ConnectRequest) -> Self {
         let framebuffer = Arc::new(Mutex::new(Framebuffer::default()));
         let (cmd_tx, cmd_rx) = tokio::sync::mpsc::unbounded_channel();

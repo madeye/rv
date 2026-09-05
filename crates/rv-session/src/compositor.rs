@@ -165,7 +165,7 @@ impl Framebuffer {
 
 /// Swap channels 0 and 2 of every packed 4-byte pixel (RGBA ⇄ BGRA).
 pub fn swap_red_blue(pixels: &mut [u8]) {
-    for px in pixels.chunks_exact_mut(4) {
+    for px in pixels.as_chunks_mut::<4>().0 {
         px.swap(0, 2);
     }
 }
@@ -188,7 +188,7 @@ mod tests {
         let mut fb = Framebuffer::default();
         fb.resize(4, 2);
         let mut red = vec![0u8; 4 * 4];
-        for px in red.chunks_exact_mut(4) {
+        for px in red.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[255, 0, 0, 255]);
         }
         fb.blit(
@@ -261,7 +261,7 @@ mod tests {
         let mut fb = Framebuffer::default();
         fb.resize(2, 2);
         // BGRA pure red.
-        for px in fb.pixels.chunks_exact_mut(4) {
+        for px in fb.pixels.as_chunks_mut::<4>().0 {
             px.copy_from_slice(&[0, 0, 255, 255]);
         }
         let png = fb.thumbnail_png(2).unwrap();

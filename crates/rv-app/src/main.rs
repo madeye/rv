@@ -26,30 +26,7 @@ fn main() {
         macos_dock_icon::set();
 
         gpui_component::init(cx);
-        cx.bind_keys([
-            KeyBinding::new("cmd-n", NewConnection, Some("AddressBook")),
-            KeyBinding::new("ctrl-n", NewConnection, Some("AddressBook")),
-            KeyBinding::new("cmd-f", FocusSearch, Some("AddressBook")),
-            KeyBinding::new("ctrl-f", FocusSearch, Some("AddressBook")),
-            KeyBinding::new("cmd-l", ToggleViewMode, Some("AddressBook")),
-            KeyBinding::new("ctrl-l", ToggleViewMode, Some("AddressBook")),
-            KeyBinding::new("cmd-i", OpenProperties, Some("AddressBook")),
-            KeyBinding::new("ctrl-i", OpenProperties, Some("AddressBook")),
-            KeyBinding::new("cmd-d", DuplicateSelected, Some("AddressBook")),
-            KeyBinding::new("ctrl-d", DuplicateSelected, Some("AddressBook")),
-            KeyBinding::new("cmd-b", ToggleSidebar, Some("AddressBook")),
-            KeyBinding::new("ctrl-b", ToggleSidebar, Some("AddressBook")),
-            KeyBinding::new("cmd-,", OpenPreferences, Some("AddressBook")),
-            KeyBinding::new("ctrl-,", OpenPreferences, Some("AddressBook")),
-            KeyBinding::new("enter", ConnectSelected, Some("AddressBook")),
-            KeyBinding::new("escape", CloseModal, Some("AddressBook")),
-            KeyBinding::new("delete", DeleteSelected, Some("AddressBook")),
-            KeyBinding::new("cmd-backspace", DeleteSelected, Some("AddressBook")),
-            KeyBinding::new("cmd-q", QuitApp, None),
-            KeyBinding::new("cmd-shift-f", SessionFullscreen, Some("Session")),
-            KeyBinding::new("cmd-w", SessionClose, Some("Session")),
-            KeyBinding::new("f8", SessionMenu, Some("Session")),
-        ]);
+        bind_keys(cx);
 
         let bounds = Bounds::centered(None, size(px(1100.), px(720.)), cx);
         let mut options = TitleBar::window_options();
@@ -87,6 +64,33 @@ fn main() {
         })
         .detach();
     });
+}
+
+fn bind_keys(cx: &mut App) {
+    cx.bind_keys([
+        KeyBinding::new("cmd-n", NewConnection, Some("AddressBook")),
+        KeyBinding::new("ctrl-n", NewConnection, Some("AddressBook")),
+        KeyBinding::new("cmd-f", FocusSearch, Some("AddressBook")),
+        KeyBinding::new("ctrl-f", FocusSearch, Some("AddressBook")),
+        KeyBinding::new("cmd-l", ToggleViewMode, Some("AddressBook")),
+        KeyBinding::new("ctrl-l", ToggleViewMode, Some("AddressBook")),
+        KeyBinding::new("cmd-i", OpenProperties, Some("AddressBook")),
+        KeyBinding::new("ctrl-i", OpenProperties, Some("AddressBook")),
+        KeyBinding::new("cmd-d", DuplicateSelected, Some("AddressBook")),
+        KeyBinding::new("ctrl-d", DuplicateSelected, Some("AddressBook")),
+        KeyBinding::new("cmd-b", ToggleSidebar, Some("AddressBook")),
+        KeyBinding::new("ctrl-b", ToggleSidebar, Some("AddressBook")),
+        KeyBinding::new("cmd-,", OpenPreferences, Some("AddressBook")),
+        KeyBinding::new("ctrl-,", OpenPreferences, Some("AddressBook")),
+        KeyBinding::new("enter", ConnectSelected, Some("AddressBook")),
+        KeyBinding::new("escape", CloseModal, Some("AddressBook")),
+        KeyBinding::new("delete", DeleteSelected, Some("AddressBook")),
+        KeyBinding::new("cmd-backspace", DeleteSelected, Some("AddressBook")),
+        KeyBinding::new("cmd-q", QuitApp, None),
+        KeyBinding::new("cmd-shift-f", SessionFullscreen, Some("Session")),
+        KeyBinding::new("cmd-w", SessionClose, Some("Session")),
+        KeyBinding::new("f8", SessionMenu, Some("Session")),
+    ]);
 }
 
 #[cfg(target_os = "macos")]

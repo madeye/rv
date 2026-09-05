@@ -9,6 +9,9 @@ description = "Tokio RFB session, framebuffer compositor, and VeNCrypt for RV"
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 rv-core.workspace = true
 image.workspace = true
