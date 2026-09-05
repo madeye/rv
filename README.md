@@ -14,6 +14,7 @@ A native desktop VNC viewer written in Rust with [GPUI](https://www.gpui.rs/). D
 - Reconnect from the disconnect / error overlay
 - Clipboard sync (Latin-1, per RFB)
 - VNC Auth, Tight / ZRLE / TRLE / Raw encodings
+- Mac Screen Sharing / Apple Remote Desktop (ARD) login using the **Username** and **Password** fields in connection properties. ARD encrypts credentials, but requires no legacy VNC password setting on the Mac. Use **Let server choose**; **Always on** still requires VeNCrypt session TLS.
 - VeNCrypt TLS: `TLSVnc` / `TLSNone` (anonymous TLS, TigerVNC's default) via OpenSSL, `X509Vnc` / `X509None` via rustls with WebPKI roots. `Let server choose` picks encryption automatically when the server offers nothing else
 - Passwords stored in the OS keychain
 - Touch ID for saved passwords in signed macOS builds (with macOS password fallback)
@@ -78,6 +79,19 @@ RV_DATA_DIR=/tmp/rv-scratch cargo run -p rv-app -- 127.0.0.1:5999
 ```
 
 `RV_DATA_DIR` overrides the address-book location (default: the platform data directory).
+
+To test Mac authentication locally:
+
+```sh
+RV_MOCK_ARD=1 cargo run -p rv-session --example mock_server 127.0.0.1:5999
+```
+
+Connect to `127.0.0.1:5999` with username `test-user` and password `test-password`
+(or set `RV_MOCK_USERNAME` / `RV_MOCK_PASSWORD` on the server). The mock offers
+`ARD, 33, 36, 35`, decrypts and validates both credentials, and rejects incorrect
+logins. ARD mode takes precedence over `RV_MOCK_TLS`. Automated TCP tests cover
+accepted/rejected logins, missing credentials, desktop frames, and input after
+authentication; malformed DH parameters and credential byte limits have unit tests.
 
 ## macOS signing and Touch ID
 

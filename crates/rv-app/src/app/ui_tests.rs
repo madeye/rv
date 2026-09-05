@@ -2,7 +2,7 @@ use super::{AddressBookApp, Modal, ViewMode, WindowRoot};
 use crate::actions::*;
 use gpui::{AppContext, Entity, Modifiers, TestAppContext, VisualTestContext, px};
 use gpui_component::Root;
-use rv_core::{AddressBook, Connection};
+use rv_core::{AddressBook, ConnectRequest, Connection};
 use tempfile::TempDir;
 
 fn setup(
@@ -53,6 +53,8 @@ fn offscreen_save_connection_persists_form_and_clears_password(cx: &mut TestAppC
         app.update(cx, |app, cx| {
             app.name_input
                 .update(cx, |input, cx| input.set_value("Office", window, cx));
+            app.username_input
+                .update(cx, |input, cx| input.set_value("  mac-user  ", window, cx));
             app.labels_input.update(cx, |input, cx| {
                 input.set_value("work, lab, work", window, cx)
             });
@@ -72,6 +74,11 @@ fn offscreen_save_connection_persists_form_and_clears_password(cx: &mut TestAppC
     assert_eq!(
         (saved.name.as_str(), saved.host.as_str(), saved.port),
         ("Office", "example.test", 5902)
+    );
+    assert_eq!(saved.username.as_deref(), Some("mac-user"));
+    assert_eq!(
+        ConnectRequest::from_connection(saved, None).username,
+        saved.username
     );
     assert_eq!(saved.labels, ["lab", "work"]);
     assert!(!saved.remember_password);
@@ -126,12 +133,14 @@ fn offscreen_busy_editor_blocks_buttons_and_duplicate_actions(cx: &mut TestAppCo
 fn offscreen_properties_save_preserves_remembered_password_setting(cx: &mut TestAppContext) {
     let mut connection = Connection::new("Office", "example.test", 5900);
     connection.remember_password = true;
+    connection.username = Some("mac-user".into());
     let id = connection.id;
     let (app, cx, dir) = setup(cx, vec![connection]);
     app.update(cx, |app, _| app.selected = Some(id));
     cx.dispatch_action(OpenProperties);
     app.read_with(cx, |app, cx| {
         assert_eq!(app.editing, Some(id));
+        assert_eq!(app.username_input.read(cx).value().as_ref(), "mac-user");
         assert!(app.remember_password);
         assert!(app.password_input.read(cx).unmask_value().is_empty());
     });
@@ -139,6 +148,7 @@ fn offscreen_properties_save_preserves_remembered_password_setting(cx: &mut Test
     app.read_with(cx, |app, _| assert!(matches!(app.modal, Modal::None)));
     let book = AddressBook::load(rv_core::StorePaths::in_dir(dir.path().into())).unwrap();
     assert!(book.get(id).unwrap().remember_password);
+    assert_eq!(book.get(id).unwrap().username.as_deref(), Some("mac-user"));
 }
 
 #[gpui::test]
@@ -160,4 +170,39 @@ fn offscreen_search_and_view_shortcuts_keep_address_book_intact(cx: &mut TestApp
     });
     cx.simulate_keystrokes("escape");
     app.read_with(cx, |app, cx| assert_eq!(app.visible(cx).len(), 2));
+}
+
+#[gpui::test]
+fn offscreen_username_can_be_cleared_and_does_not_leak_into_new_connection(
+    cx: &mut TestAppContext,
+) {
+    let mut connection = Connection::new("Office", "example.test", 5900);
+    connection.username = Some("mac-user".into());
+    let id = connection.id;
+    let (app, cx, dir) = setup(cx, vec![connection]);
+    app.update(cx, |app, _| app.selected = Some(id));
+    cx.dispatch_action(OpenProperties);
+    click(cx, "modal-cancel");
+    cx.update(|window, cx| app.read(cx).focus.clone().focus(window, cx));
+    cx.dispatch_action(NewConnection);
+    app.read_with(cx, |app, cx| {
+        assert!(app.username_input.read(cx).value().is_empty())
+    });
+    click(cx, "modal-cancel");
+    cx.update(|window, cx| app.read(cx).focus.clone().focus(window, cx));
+    cx.dispatch_action(OpenProperties);
+    cx.update(|window, cx| {
+        app.update(cx, |app, cx| {
+            app.username_input
+                .update(cx, |input, cx| input.set_value("  ", window, cx));
+        })
+    });
+    click(cx, "modal-save");
+    let book = AddressBook::load(rv_core::StorePaths::in_dir(dir.path().into())).unwrap();
+    assert!(book.get(id).unwrap().username.is_none());
+    assert!(
+        ConnectRequest::from_connection(book.get(id).unwrap(), None)
+            .username
+            .is_none()
+    );
 }

@@ -98,7 +98,7 @@ enum Transport {
 /// security list itself, but by the time we know which transport to use we
 /// have already done that on the raw socket. So this replays a greeting
 /// matching the real negotiation and swallows the client's version reply
-/// (plus its type choice when VeNCrypt already consumed that step).
+/// (plus its type choice when VeNCrypt or ARD already consumed that step).
 pub struct RfbStream {
     inner: Transport,
     prefix: Vec<u8>,
@@ -121,7 +121,15 @@ impl RfbStream {
         }
     }
 
-    fn encrypted(inner: Transport, auth: VencryptAuth) -> Self {
+    /// ARD has already checked the real SecurityResult. Replay success only
+    /// after that check: vnc-rs does not validate the result for None auth.
+    pub(crate) fn authenticated(stream: TcpStream) -> Self {
+        let mut result = Self::negotiated(Transport::Plain(stream), VencryptAuth::None);
+        result.prefix.extend_from_slice(&0u32.to_be_bytes());
+        result
+    }
+
+    fn negotiated(inner: Transport, auth: VencryptAuth) -> Self {
         Self {
             inner,
             prefix: greeting(&[auth.security_type()]),
@@ -269,7 +277,7 @@ pub async fn handshake(mut stream: TcpStream, host: &str) -> Result<RfbStream, S
     } else {
         Transport::Anonymous(Box::new(anonymous_tls(stream).await?))
     };
-    Ok(RfbStream::encrypted(transport, auth))
+    Ok(RfbStream::negotiated(transport, auth))
 }
 
 /// Choose the VeNCrypt subtype: keep VncAuth over None, and prefer a

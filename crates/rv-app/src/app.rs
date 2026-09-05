@@ -91,6 +91,7 @@ pub struct AddressBookApp {
     search: Entity<InputState>,
     name_input: Entity<InputState>,
     server_input: Entity<InputState>,
+    username_input: Entity<InputState>,
     password_input: Entity<InputState>,
     labels_input: Entity<InputState>,
     collapsed: bool,
@@ -157,15 +158,23 @@ impl AddressBookApp {
         let server_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("host, host:1, host::5901, [::1]:5900")
         });
+        let username_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder("Mac login name (optional)"));
         let password_input = cx.new(|cx| {
             InputState::new(window, cx)
-                .placeholder("VNC password (optional)")
+                .placeholder("Password (optional)")
                 .masked(true)
         });
         let labels_input = cx.new(|cx| InputState::new(window, cx).placeholder("work, lab, home"));
 
         let mut subscriptions = Vec::new();
-        for input in [&name_input, &server_input, &password_input, &labels_input] {
+        for input in [
+            &name_input,
+            &server_input,
+            &username_input,
+            &password_input,
+            &labels_input,
+        ] {
             subscriptions.push(cx.subscribe_in(
                 input,
                 window,
@@ -195,6 +204,7 @@ impl AddressBookApp {
             search,
             name_input,
             server_input,
+            username_input,
             password_input,
             labels_input,
             collapsed: false,
@@ -259,8 +269,13 @@ impl AddressBookApp {
         if self.credential_busy {
             return;
         }
-        let (name, server, labels) = match conn {
-            Some(c) => (c.name.clone(), c.server_display(), c.labels.join(", ")),
+        let (name, server, username, labels) = match conn {
+            Some(c) => (
+                c.name.clone(),
+                c.server_display(),
+                c.username.clone().unwrap_or_default(),
+                c.labels.join(", "),
+            ),
             None => Default::default(),
         };
         self.editing = conn.map(|c| c.id);
@@ -273,6 +288,8 @@ impl AddressBookApp {
             .update(cx, |s, cx| s.set_value(name, window, cx));
         self.server_input
             .update(cx, |s, cx| s.set_value(server, window, cx));
+        self.username_input
+            .update(cx, |s, cx| s.set_value(username, window, cx));
         self.password_input
             .update(cx, |s, cx| s.set_value("", window, cx));
         self.labels_input
@@ -320,6 +337,7 @@ impl AddressBookApp {
         }
         let name = self.name_input.read(cx).value().to_string();
         let server = self.server_input.read(cx).value().to_string();
+        let username = self.username_input.read(cx).value().trim().to_string();
         let password = self.password_input.read(cx).unmask_value().to_string();
         let labels = parse_labels(&self.labels_input.read(cx).value());
         let (host, port) = match parse_server(&server) {
@@ -340,6 +358,7 @@ impl AddressBookApp {
         };
         conn.host = host;
         conn.port = port;
+        conn.username = (!username.is_empty()).then_some(username);
         conn.labels = labels;
         conn.encryption = self.encryption;
         conn.quality = self.quality;
@@ -931,6 +950,7 @@ impl AddressBookApp {
                 .gap_3()
                 .child(field("VNC server", Input::new(&self.server_input), cx))
                 .child(field("Name", Input::new(&self.name_input), cx))
+                .child(field("Username", Input::new(&self.username_input), cx))
                 .child(field("Password", Input::new(&self.password_input), cx))
                 .when(self.editing.is_some() && self.remember_password, |this| {
                     this.child(

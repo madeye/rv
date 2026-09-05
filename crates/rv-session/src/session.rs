@@ -251,13 +251,19 @@ async fn dial(addr: &str) -> Result<TcpStream, SessionError> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Transport {
     Plain,
+    Ard,
     VeNCrypt,
 }
 
-fn choose_transport(mode: EncryptionMode, types: &[u8]) -> Result<Transport, SessionError> {
+fn choose_transport(
+    mode: EncryptionMode,
+    types: &[u8],
+    has_username: bool,
+) -> Result<Transport, SessionError> {
     let plain_ok = types
         .iter()
         .any(|t| matches!(*t, vencrypt::SEC_NONE | vencrypt::SEC_VNC_AUTH));
+    let ard_ok = types.contains(&crate::ard::SECURITY_TYPE);
     let vencrypt_ok = types.contains(&vencrypt::VENCRYPT_SECURITY_TYPE);
     let offered = || {
         types
@@ -274,13 +280,14 @@ fn choose_transport(mode: EncryptionMode, types: &[u8]) -> Result<Transport, Ses
         ))),
         EncryptionMode::PreferOn if vencrypt_ok => Ok(Transport::VeNCrypt),
         EncryptionMode::LetServerChoose if vencrypt_ok && !plain_ok => Ok(Transport::VeNCrypt),
+        _ if ard_ok && (has_username || !plain_ok) => Ok(Transport::Ard),
         _ if plain_ok => Ok(Transport::Plain),
         EncryptionMode::Off if vencrypt_ok => Err(SessionError::msg(format!(
             "server requires encryption (offers: {}); set Encryption to Let server choose",
             offered()
         ))),
         _ => Err(SessionError::msg(format!(
-            "no supported security type (server offers: {}; RV supports None, VncAuth, VeNCrypt)",
+            "no supported security type (server offers: {}; RV supports None, VncAuth, ARD, VeNCrypt)",
             offered()
         ))),
     }
@@ -293,8 +300,28 @@ async fn connect(
     let addr = format!("{}:{}", request.host, request.port);
     let mut tcp = dial(&addr).await?;
     let types = vencrypt::read_security_types(&mut tcp).await?;
-    let stream = match choose_transport(request.encryption, &types)? {
+    let stream = match choose_transport(
+        request.encryption,
+        &types,
+        request.username.as_ref().is_some_and(|u| !u.is_empty()),
+    )? {
         Transport::Plain => vencrypt::RfbStream::plain(tcp, &types),
+        Transport::Ard => {
+            send(SessionEvent::Status(
+                "Authenticating with Mac login…".into(),
+            ));
+            timeout(
+                CONNECT_TIMEOUT,
+                crate::ard::handshake(
+                    &mut tcp,
+                    request.username.as_deref(),
+                    request.password.as_deref(),
+                ),
+            )
+            .await
+            .map_err(|_| SessionError::Timeout)??;
+            vencrypt::RfbStream::authenticated(tcp)
+        }
         Transport::VeNCrypt => {
             send(SessionEvent::Status("Negotiating VeNCrypt…".into()));
             vencrypt::handshake(tcp, &request.host).await?
@@ -449,35 +476,66 @@ mod transport_tests {
     #[test]
     fn let_server_choose_prefers_plain_but_accepts_vencrypt_only() {
         assert_eq!(
-            choose_transport(EncryptionMode::LetServerChoose, &[1, 2, 19]).unwrap(),
+            choose_transport(EncryptionMode::LetServerChoose, &[1, 2, 19], false).unwrap(),
             Transport::Plain
         );
         assert_eq!(
-            choose_transport(EncryptionMode::LetServerChoose, &[19]).unwrap(),
+            choose_transport(EncryptionMode::LetServerChoose, &[19], false).unwrap(),
             Transport::VeNCrypt
         );
-        assert!(choose_transport(EncryptionMode::LetServerChoose, &[16, 30]).is_err());
+        assert!(choose_transport(EncryptionMode::LetServerChoose, &[16, 33], false).is_err());
     }
 
     #[test]
     fn prefer_on_and_always() {
         assert_eq!(
-            choose_transport(EncryptionMode::PreferOn, &[2, 19]).unwrap(),
+            choose_transport(EncryptionMode::PreferOn, &[2, 19], false).unwrap(),
             Transport::VeNCrypt
         );
         assert_eq!(
-            choose_transport(EncryptionMode::PreferOn, &[2]).unwrap(),
+            choose_transport(EncryptionMode::PreferOn, &[2], false).unwrap(),
             Transport::Plain
         );
-        assert!(choose_transport(EncryptionMode::Always, &[2]).is_err());
+        assert!(choose_transport(EncryptionMode::Always, &[2], false).is_err());
     }
 
     #[test]
     fn off_never_encrypts() {
         assert_eq!(
-            choose_transport(EncryptionMode::Off, &[2, 19]).unwrap(),
+            choose_transport(EncryptionMode::Off, &[2, 19], false).unwrap(),
             Transport::Plain
         );
-        assert!(choose_transport(EncryptionMode::Off, &[19]).is_err());
+        assert!(choose_transport(EncryptionMode::Off, &[19], false).is_err());
+    }
+    #[test]
+    fn apple_security_offer_selects_ard_without_weakening_required_tls() {
+        let types = [30, 33, 36, 35];
+        for mode in [
+            EncryptionMode::LetServerChoose,
+            EncryptionMode::PreferOn,
+            EncryptionMode::Off,
+        ] {
+            assert_eq!(
+                choose_transport(mode, &types, true).unwrap(),
+                Transport::Ard
+            );
+            assert_eq!(
+                choose_transport(mode, &types, false).unwrap(),
+                Transport::Ard
+            );
+        }
+        assert!(choose_transport(EncryptionMode::Always, &types, true).is_err());
+        assert_eq!(
+            choose_transport(EncryptionMode::LetServerChoose, &[2, 30], true).unwrap(),
+            Transport::Ard
+        );
+        assert_eq!(
+            choose_transport(EncryptionMode::LetServerChoose, &[2, 30], false).unwrap(),
+            Transport::Plain
+        );
+        assert_eq!(
+            choose_transport(EncryptionMode::PreferOn, &[2, 19, 30], true).unwrap(),
+            Transport::VeNCrypt
+        );
     }
 }

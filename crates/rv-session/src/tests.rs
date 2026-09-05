@@ -1,3 +1,6 @@
+#[path = "../examples/support/ard.rs"]
+mod ard_server;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc;
@@ -29,7 +32,11 @@ fn rfb_handshake(sock: &mut TcpStream, width: u16, height: u16, name: &[u8]) {
     sock.write_all(&[1, 1]).unwrap(); // one type: None
     let _choice = read_exact(sock, 1);
     write_u32(sock, 0); // SecurityResult OK
-    let _shared = read_exact(sock, 1);
+    rfb_server_init(sock, width, height, name);
+}
+
+fn rfb_server_init(sock: &mut TcpStream, width: u16, height: u16, name: &[u8]) {
+    assert_eq!(read_exact(sock, 1), [1], "expected shared ClientInit");
 
     write_u16(sock, width);
     write_u16(sock, height);
@@ -46,7 +53,10 @@ fn rfb_handshake(sock: &mut TcpStream, width: u16, height: u16, name: &[u8]) {
 /// Minimal RFB 3.8 server: None auth, 8×8 Raw framebuffer, then echo input.
 fn mock_rfb_server(mut sock: TcpStream) {
     rfb_handshake(&mut sock, 8, 8, b"test");
+    mock_rfb_messages(sock);
+}
 
+fn mock_rfb_messages(mut sock: TcpStream) -> bool {
     let mut saw_pointer = false;
     let mut saw_key = false;
     let mut sent_frame = false;
@@ -108,6 +118,7 @@ fn mock_rfb_server(mut sock: TcpStream) {
             break;
         }
     }
+    sent_frame && saw_pointer && saw_key
 }
 
 fn wait_for(
@@ -133,6 +144,7 @@ fn request_for(port: u16) -> ConnectRequest {
         name: "mock".into(),
         host: "127.0.0.1".into(),
         port,
+        username: None,
         password: None,
         encryption: EncryptionMode::Off,
         quality: QualityPreset::Fast,
@@ -360,4 +372,126 @@ fn key_events_are_not_starved_by_frame_updates() {
     handle.close();
     drop(handle);
     let _ = server.join();
+}
+
+/// Exercises the complete session, including the adapter's replayed greeting.
+/// The mock decrypts the credentials before sending a successful SecurityResult.
+#[test]
+fn ard_authentication_frame_and_input() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let server = thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        ard_server::authenticate(&mut sock, "test-user", "test-password").unwrap();
+        sock.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        rfb_server_init(&mut sock, 8, 8, b"ARD mock");
+        assert!(
+            mock_rfb_messages(sock),
+            "expected framebuffer and both input types"
+        );
+    });
+    let mut request = request_for(port);
+    request.username = Some("test-user".into());
+    request.password = Some("test-password".into());
+    let handle = SessionHandle::spawn(request);
+    assert!(
+        wait_for(&handle, Duration::from_secs(5), |event| {
+            if let SessionEvent::Error(error) = event {
+                panic!("ARD connection failed: {error}");
+            }
+            matches!(event, SessionEvent::FrameReady { .. })
+                && handle.framebuffer.lock().unwrap().pixels.get(..4) == Some(&[0, 80, 200, 255])
+        }),
+        "expected authenticated desktop frame"
+    );
+    {
+        let fb = handle.framebuffer.lock().unwrap();
+        assert_eq!((fb.width, fb.height), (8, 8));
+        assert_eq!(&fb.pixels[..4], &[0, 80, 200, 255]);
+    }
+    handle.pointer(1, 1, 1);
+    handle.key(0xff0d, true);
+    handle.key(0xff0d, false);
+    server.join().unwrap();
+    handle.close();
+}
+
+fn assert_ard_rejected(username: Option<&str>, password: Option<&str>, expected: &str) {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let sent_credentials = username.is_some() && password.is_some();
+    let server = thread::spawn(move || {
+        let (mut sock, _) = listener.accept().unwrap();
+        let error = ard_server::authenticate(&mut sock, "test-user", "test-password").unwrap_err();
+        if sent_credentials {
+            assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+            // A rejected login must never be followed by ClientInit, even
+            // though vnc-rs's own None path ignores authentication failures.
+            let mut byte = [0];
+            match sock.read(&mut byte) {
+                Ok(0) => {}
+                Err(e)
+                    if matches!(
+                        e.kind(),
+                        std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::BrokenPipe
+                    ) => {}
+                result => panic!("unexpected traffic after failed authentication: {result:?}"),
+            }
+        } else {
+            assert_eq!(error.kind(), std::io::ErrorKind::UnexpectedEof);
+        }
+    });
+    let mut request = request_for(port);
+    request.username = username.map(str::to_owned);
+    request.password = password.map(str::to_owned);
+    let handle = SessionHandle::spawn(request);
+    assert!(
+        wait_for(&handle, Duration::from_secs(5), |event| {
+            match event {
+                SessionEvent::Connected { .. } | SessionEvent::FrameReady { .. } => {
+                    panic!("unauthenticated session started")
+                }
+                SessionEvent::Error(error) => {
+                    assert!(error.contains(expected), "unexpected error: {error}");
+                    true
+                }
+                _ => false,
+            }
+        }),
+        "expected authentication error"
+    );
+    server.join().unwrap();
+    handle.close();
+}
+
+#[test]
+fn ard_wrong_password_never_starts_session() {
+    assert_ard_rejected(
+        Some("test-user"),
+        Some("wrong-password"),
+        "Mac login was rejected",
+    );
+}
+
+#[test]
+fn ard_wrong_username_never_starts_session() {
+    assert_ard_rejected(
+        Some("wrong-user"),
+        Some("test-password"),
+        "Mac login was rejected",
+    );
+}
+
+#[test]
+fn ard_missing_credentials_explain_mac_login_requirement() {
+    assert_ard_rejected(
+        None,
+        Some("test-password"),
+        "Mac requires a username and password",
+    );
+    assert_ard_rejected(
+        Some("test-user"),
+        None,
+        "Mac requires a username and password",
+    );
 }

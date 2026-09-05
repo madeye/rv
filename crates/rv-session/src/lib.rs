@@ -1,5 +1,6 @@
 //! Tokio-backed VNC session for RV.
 
+mod ard;
 mod compositor;
 mod encodings;
 mod error;

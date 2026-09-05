@@ -6,6 +6,13 @@
 //! encrypted transport and its input path can be exercised without a real
 //! server. Any 16-byte VncAuth response is accepted.
 
+//! `RV_MOCK_ARD=1` instead offers Apple's security types and validates the
+//! encrypted Mac login. Defaults: username `test-user`, password `test-password`;
+//! override with `RV_MOCK_USERNAME` / `RV_MOCK_PASSWORD`.
+
+#[path = "support/ard.rs"]
+mod ard;
+
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::OnceLock;
@@ -93,6 +100,12 @@ fn frame_bgra(t: f32) -> Vec<u8> {
 /// RFB version exchange plus security negotiation, ending with SecurityResult
 /// OK. Returns the (optionally TLS-wrapped) stream ready for ClientInit.
 fn negotiate(mut sock: TcpStream) -> std::io::Result<Box<dyn ReadWrite>> {
+    if matches!(std::env::var("RV_MOCK_ARD").as_deref(), Ok("1")) {
+        let username = std::env::var("RV_MOCK_USERNAME").unwrap_or_else(|_| "test-user".into());
+        let password = std::env::var("RV_MOCK_PASSWORD").unwrap_or_else(|_| "test-password".into());
+        ard::authenticate(&mut sock, &username, &password)?;
+        return Ok(Box::new(sock));
+    }
     sock.write_all(b"RFB 003.008\n")?;
     let _ = read_exact(&mut sock, 12)?;
 
@@ -233,12 +246,14 @@ fn main() {
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:5901".into());
     let listener = TcpListener::bind(&addr).expect("bind");
-    let tls = if tls_enabled() {
+    let security = if matches!(std::env::var("RV_MOCK_ARD").as_deref(), Ok("1")) {
+        " (ARD Mac login)"
+    } else if tls_enabled() {
         " (VeNCrypt TLSVnc)"
     } else {
         " (no password)"
     };
-    eprintln!("RV mock VNC server on {addr}{tls}");
+    eprintln!("RV mock VNC server on {addr}{security}");
     for incoming in listener.incoming() {
         match incoming {
             Ok(sock) => {

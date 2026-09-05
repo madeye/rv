@@ -26,10 +26,10 @@ impl std::fmt::Display for ConnectionId {
 /// How the viewer should negotiate RFB security / VeNCrypt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum EncryptionMode {
-    /// Prefer unencrypted None / VNC-Auth; VeNCrypt-only servers fail with a hint.
+    /// Prefer plain authentication, accepting VeNCrypt when required by the server.
     #[default]
     LetServerChoose,
-    /// Try VeNCrypt first, then fall back to None / VNC-Auth.
+    /// Try VeNCrypt first, then fall back to None / VNC-Auth / ARD.
     PreferOn,
     /// Require VeNCrypt TLS.
     Always,
@@ -179,6 +179,7 @@ pub struct ConnectRequest {
     pub name: String,
     pub host: String,
     pub port: u16,
+    pub username: Option<String>,
     pub password: Option<String>,
     pub encryption: EncryptionMode,
     pub quality: QualityPreset,
@@ -193,6 +194,7 @@ impl ConnectRequest {
             name: conn.name.clone(),
             host: conn.host.clone(),
             port: conn.port,
+            username: conn.username.clone(),
             password,
             encryption: conn.encryption,
             quality: conn.quality,
