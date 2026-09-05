@@ -1,0 +1,75 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" role="img" aria-labelledby="title desc">
+  <title id="title">RV</title>
+  <desc id="desc">Two overlapping remote desktop windows and a white pointer on a rounded midnight-blue tile.</desc>
+  <defs>
+    <linearGradient id="tile" x1="160" y1="100" x2="800" y2="924" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#294A65"/>
+      <stop offset=".5" stop-color="#183348"/>
+      <stop offset="1" stop-color="#101F32"/>
+    </linearGradient>
+    <radialGradient id="light" cx=".18" cy="0" r="1">
+      <stop stop-color="#69DDD8" stop-opacity=".12"/>
+      <stop offset="1" stop-color="#69DDD8" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="edge" x1="0" y1="0" x2=".5" y2="1">
+      <stop stop-color="#BCE5EC" stop-opacity=".35"/>
+      <stop offset=".55" stop-color="#BCE5EC" stop-opacity=".06"/>
+      <stop offset="1" stop-color="#BCE5EC" stop-opacity=".12"/>
+    </linearGradient>
+    <linearGradient id="remote" x1="240" y1="260" x2="620" y2="580" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#70E4D6"/>
+      <stop offset="1" stop-color="#29A5B5"/>
+    </linearGradient>
+    <linearGradient id="viewer" x1="380" y1="400" x2="760" y2="748" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#BBC8FF"/>
+      <stop offset=".5" stop-color="#8E9FEB"/>
+      <stop offset="1" stop-color="#6C79CB"/>
+    </linearGradient>
+    <linearGradient id="pointer" x1="635" y1="550" x2="744" y2="730" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFFFFF"/>
+      <stop offset="1" stop-color="#DEEDF9"/>
+    </linearGradient>
+    <filter id="tileShadow" x="-15%" y="-15%" width="130%" height="135%" color-interpolation-filters="sRGB">
+      <feDropShadow dy="16" stdDeviation="12" flood-color="#081624" flood-opacity=".24"/>
+    </filter>
+    <filter id="windowShadow" x="-25%" y="-25%" width="160%" height="170%" color-interpolation-filters="sRGB">
+      <feDropShadow dy="20" stdDeviation="20" flood-color="#071525" flood-opacity=".32"/>
+      <feDropShadow dy="3" stdDeviation="3" flood-color="#071525" flood-opacity=".16"/>
+    </filter>
+    <filter id="pointerShadow" x="-50%" y="-35%" width="210%" height="190%" color-interpolation-filters="sRGB">
+      <feDropShadow dy="10" stdDeviation="8" flood-color="#15213F" flood-opacity=".38"/>
+    </filter>
+  </defs>
+
+  <!-- Transparent margins and a baked-in silhouette also work for the runtime Dock icon. -->
+  <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#tile)" filter="url(#tileShadow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="184" fill="url(#light)"/>
+  <rect x="102" y="102" width="820" height="820" rx="182" fill="none" stroke="url(#edge)" stroke-width="3"/>
+
+  <!-- A remote desktop behind the active viewer. Keep the surfaces clear at small sizes. -->
+  <g filter="url(#windowShadow)">
+    <rect x="224" y="258" width="430" height="322" rx="36" fill="url(#remote)"/>
+    <path d="M260 258H618Q654 258 654 294V316H224V294Q224 258 260 258Z" fill="#126A7C"/>
+    <rect x="225.5" y="259.5" width="427" height="319" rx="34.5" fill="none" stroke="#BEFFF2" stroke-opacity=".4" stroke-width="3"/>
+    <g fill="#B6F5EE">
+      <circle cx="254" cy="287" r="7"/>
+      <circle cx="279" cy="287" r="7" opacity=".65"/>
+      <circle cx="304" cy="287" r="7" opacity=".4"/>
+    </g>
+  </g>
+
+  <g filter="url(#windowShadow)">
+    <rect x="350" y="392" width="450" height="342" rx="36" fill="url(#viewer)"/>
+    <path d="M386 392H764Q800 392 800 428V450H350V428Q350 392 386 392Z" fill="#5265A7"/>
+    <rect x="351.5" y="393.5" width="447" height="339" rx="34.5" fill="none" stroke="#E2E8FF" stroke-opacity=".5" stroke-width="3"/>
+    <g fill="#E0E7FF">
+      <circle cx="380" cy="421" r="7"/>
+      <circle cx="405" cy="421" r="7" opacity=".65"/>
+      <circle cx="430" cy="421" r="7" opacity=".4"/>
+    </g>
+  </g>
+
+  <!-- A larger pointer carries the remote-control cue without a neon halo. -->
+  <path d="M624 544L626 686L662 652L693 720L726 704L695 640L752 636Z"
+        fill="url(#pointer)" stroke="#243454" stroke-width="9" stroke-linejoin="round" filter="url(#pointerShadow)"/>
+</svg>

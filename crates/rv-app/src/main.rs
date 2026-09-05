@@ -22,6 +22,9 @@ fn main() {
 
     let app = gpui_platform::application().with_assets(gpui_component_assets::Assets);
     app.run(move |cx| {
+        #[cfg(target_os = "macos")]
+        macos_dock_icon::set();
+
         gpui_component::init(cx);
         cx.bind_keys([
             KeyBinding::new("cmd-n", NewConnection, Some("AddressBook")),
@@ -84,6 +87,29 @@ fn main() {
         })
         .detach();
     });
+}
+
+#[cfg(target_os = "macos")]
+mod macos_dock_icon {
+    use objc2::{AnyThread, MainThreadMarker};
+    use objc2_app_kit::{NSApplication, NSImage};
+    use objc2_foundation::NSData;
+
+    const PNG: &[u8] = include_bytes!("../../../assets/app-icon.png");
+
+    pub fn set() {
+        let Some(mtm) = MainThreadMarker::new() else {
+            return;
+        };
+        let data = NSData::with_bytes(PNG);
+        let Some(image) = NSImage::initWithData(NSImage::alloc(), &data) else {
+            return;
+        };
+        let app = NSApplication::sharedApplication(mtm);
+        unsafe {
+            app.setApplicationIconImage(Some(&image));
+        }
+    }
 }
 
 /// `rv host[:display]` or `rv --connect host[:display]`.

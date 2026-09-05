@@ -1,5 +1,7 @@
 # RV
 
+<img src="assets/app-icon.png" width="128" height="128" alt="RV app icon" align="right">
+
 A native desktop VNC viewer written in Rust with [GPUI](https://www.gpui.rs/). Direct RFB (RFC 6143) connections, address-book chrome, and a session toolbar inspired by RealVNC Classic Viewer / Connect Viewer — original branding, not a RealVNC product.
 
 ## Features

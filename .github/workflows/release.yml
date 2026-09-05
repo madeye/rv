@@ -39,6 +39,7 @@ jobs:
 
           APP=dist/RV.app
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
+          cp assets/app-icon.icns "$APP/Contents/Resources/app-icon.icns"
           lipo -create \
             "target/aarch64-apple-darwin/release/$BINARY" \
             "target/x86_64-apple-darwin/release/$BINARY" \
@@ -52,6 +53,7 @@ jobs:
             <key>CFBundleDisplayName</key><string>RV</string>
             <key>CFBundleIdentifier</key><string>io.github.madeye.rv</string>
             <key>CFBundleExecutable</key><string>$BINARY</string>
+            <key>CFBundleIconFile</key><string>app-icon.icns</string>
             <key>CFBundlePackageType</key><string>APPL</string>
             <key>CFBundleShortVersionString</key><string>$VERSION</string>
             <key>CFBundleVersion</key><string>$VERSION</string>
