@@ -3,6 +3,8 @@
 mod connection;
 mod keyboard;
 mod keysym;
+#[cfg(target_os = "macos")]
+mod macos_keychain;
 mod prefs;
 mod store;
 

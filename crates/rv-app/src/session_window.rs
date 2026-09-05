@@ -98,6 +98,10 @@ pub struct SessionView {
     image_box: Rc<Cell<Bounds<Pixels>>>,
     keys: Keyboard,
     focus: FocusHandle,
+    canvas_hovered: bool,
+    pointer_in_window: bool,
+    local_cursor: local_cursor::LocalCursor,
+    _cursor_subscriptions: Vec<Subscription>,
 }
 
 impl SessionView {
@@ -111,6 +115,11 @@ impl SessionView {
         let handle = SessionHandle::spawn(req.clone());
         let focus = cx.focus_handle();
         focus.focus(window, cx);
+        let cursor_subscriptions = vec![
+            cx.observe_window_activation(window, Self::update_local_cursor),
+            cx.on_focus(&focus, window, Self::update_local_cursor),
+            cx.on_blur(&focus, window, Self::update_local_cursor),
+        ];
         let SessionOptions {
             scale,
             pin_toolbar,
@@ -154,7 +163,26 @@ impl SessionView {
             image_box: Rc::new(Cell::new(Bounds::default())),
             keys: Keyboard::new(),
             focus,
+            canvas_hovered: false,
+            pointer_in_window: true,
+            local_cursor: local_cursor::LocalCursor::default(),
+            _cursor_subscriptions: cursor_subscriptions,
         }
+    }
+
+    fn update_local_cursor(&mut self, window: &mut Window, _: &mut Context<Self>) {
+        // The server paints its pointer into the framebuffer. Only hide ours
+        // over the live picture; letterboxing and local controls keep a cursor.
+        let hidden = self.phase == Phase::Connected
+            && self.render_image.is_some()
+            && !self.view_only()
+            && !self.show_menu
+            && self.canvas_hovered
+            && self.pointer_in_window
+            && window.is_window_active()
+            && self.focus.is_focused(window)
+            && self.map_pointer(window.mouse_position()).is_some();
+        self.local_cursor.set_hidden(hidden);
     }
 
     fn view_only(&self) -> bool {
@@ -194,6 +222,7 @@ impl SessionView {
                     self.status = e.into();
                 }
                 SessionEvent::Disconnected => {
+                    self.local_cursor.set_hidden(false);
                     if self.error.is_none() {
                         self.status = "Disconnected".into();
                     }
@@ -380,6 +409,7 @@ impl SessionView {
     }
 
     fn reconnect(&mut self, cx: &mut Context<Self>) {
+        self.local_cursor.set_hidden(false);
         self.handle = SessionHandle::spawn(self.req.clone());
         self.phase = Phase::Connecting;
         self.error = None;
@@ -394,6 +424,7 @@ impl SessionView {
     }
 
     fn close_window(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.local_cursor.set_hidden(false);
         self.disconnect(cx);
         window.remove_window();
     }
@@ -938,7 +969,7 @@ impl SessionView {
             )
     }
 
-    fn render_picture(&self) -> AnyElement {
+    fn render_picture(&self, cx: &Context<Self>) -> AnyElement {
         let Some(image) = self.render_image.clone() else {
             return v_flex()
                 .size_full()
@@ -960,9 +991,49 @@ impl SessionView {
         };
         let probe = {
             let cell = self.image_box.clone();
-            canvas(move |bounds, _, _| cell.set(bounds), |_, _, _, _| {})
-                .absolute()
-                .inset_0()
+            let update_cursor = cx.listener(|this, hovered: &bool, window, cx| {
+                this.canvas_hovered = *hovered;
+                this.update_local_cursor(window, cx);
+            });
+            let on_move = cx.listener(|this, hovered: &bool, window, cx| {
+                this.pointer_in_window = true;
+                this.canvas_hovered = *hovered;
+                this.update_local_cursor(window, cx);
+            });
+            let on_exit = cx.listener(|this, _: &MouseExitEvent, window, cx| {
+                // MouseExited can retain the last in-window coordinates. Keep
+                // subsequent video frames from hiding the cursor again.
+                this.pointer_in_window = false;
+                this.update_local_cursor(window, cx);
+            });
+            canvas(
+                move |bounds, window, _| {
+                    cell.set(bounds);
+                    window.insert_hitbox(bounds, HitboxBehavior::Normal)
+                },
+                move |_, hitbox, window, cx| {
+                    // Track the actual picture hitbox, including occluding UI.
+                    // Div::on_hover suppresses hover during dragging/typing,
+                    // which would bring the duplicate cursor back mid-session.
+                    let move_hitbox = hitbox.clone();
+                    window.on_mouse_event(move |_: &MouseMoveEvent, phase, window, cx| {
+                        if phase == DispatchPhase::Capture {
+                            on_move(&move_hitbox.should_handle_scroll(window), window, cx);
+                        }
+                    });
+                    window.on_mouse_event(move |event: &MouseExitEvent, phase, window, cx| {
+                        if phase == DispatchPhase::Capture {
+                            on_exit(event, window, cx);
+                        }
+                    });
+                    let hitbox = hitbox.clone();
+                    window.defer(cx, move |window, cx| {
+                        update_cursor(&hitbox.should_handle_scroll(window), window, cx);
+                    });
+                },
+            )
+            .absolute()
+            .inset_0()
         };
         match self.scale {
             ScaleMode::Fit | ScaleMode::Stretch => div()
@@ -1021,6 +1092,7 @@ impl Drop for SessionView {
 
 impl Render for SessionView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.update_local_cursor(window, cx);
         let fullscreen = window.is_fullscreen();
         let show_pinned = self.pin_toolbar;
 
@@ -1158,7 +1230,7 @@ impl Render for SessionView {
                             .on_scroll_wheel(cx.listener(|this, ev: &ScrollWheelEvent, _, _| {
                                 this.wheel(ev);
                             }))
-                            .child(self.render_picture()),
+                            .child(self.render_picture(cx)),
                     )
                     .when(!show_pinned && self.phase != Phase::Ended, |this| {
                         this.child(self.render_floating_toolbar(fullscreen, cx))
@@ -1354,6 +1426,73 @@ impl InputHandler for DisabledIme {
 
 fn disable_platform_ime(window: &Window) {
     macos_ime::disable(window);
+}
+
+mod local_cursor {
+    /// Owns exactly one balanced hide/unhide pair, even if the window is closed
+    /// while the pointer is hidden. Repaints and mouse moves must not stack hides.
+    #[derive(Default)]
+    pub struct LocalCursor {
+        hidden: bool,
+    }
+
+    impl LocalCursor {
+        pub fn set_hidden(&mut self, hidden: bool) {
+            if self.hidden != hidden {
+                set_platform_hidden(hidden);
+                self.hidden = hidden;
+            }
+        }
+    }
+
+    impl Drop for LocalCursor {
+        fn drop(&mut self) {
+            self.set_hidden(false);
+        }
+    }
+
+    #[cfg(all(target_os = "macos", not(test)))]
+    fn set_platform_hidden(hidden: bool) {
+        use objc2_app_kit::NSCursor;
+
+        if hidden {
+            NSCursor::hide();
+        } else {
+            NSCursor::unhide();
+        }
+    }
+
+    #[cfg(all(not(target_os = "macos"), not(test)))]
+    fn set_platform_hidden(_: bool) {}
+
+    #[cfg(test)]
+    std::thread_local! {
+        static TRANSITIONS: std::cell::RefCell<Vec<bool>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    #[cfg(test)]
+    fn set_platform_hidden(hidden: bool) {
+        TRANSITIONS.with_borrow_mut(|transitions| transitions.push(hidden));
+    }
+
+    #[test]
+    fn repeated_updates_and_window_close_balance_cursor_hiding() {
+        TRANSITIONS.with_borrow_mut(Vec::clear);
+        {
+            let mut cursor = LocalCursor::default();
+            cursor.set_hidden(false);
+            cursor.set_hidden(true);
+            cursor.set_hidden(true); // Mouse moves and frame updates.
+            cursor.set_hidden(false); // Leave the picture or lose focus.
+            cursor.set_hidden(false);
+            cursor.set_hidden(true); // Return to the remote desktop.
+        } // Closing the window must restore the cursor.
+        TRANSITIONS.with_borrow(|transitions| {
+            assert_eq!(transitions, &[true, false, true, false]);
+        });
+        drop(LocalCursor::default());
+        TRANSITIONS.with_borrow(|transitions| assert_eq!(transitions.len(), 4));
+    }
 }
 
 #[cfg(target_os = "macos")]

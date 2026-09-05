@@ -105,6 +105,7 @@ pub struct AddressBookApp {
     editing: Option<ConnectionId>,
     modal: Modal,
     status: SharedString,
+    credential_busy: bool,
     focus: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -198,6 +199,7 @@ impl AddressBookApp {
             editing: None,
             modal: Modal::None,
             status,
+            credential_busy: false,
             focus,
             _subscriptions: subscriptions,
         }
@@ -244,17 +246,11 @@ impl AddressBookApp {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let (name, server, labels, password) = match conn {
-            Some(c) => (
-                c.name.clone(),
-                c.server_display(),
-                c.labels.join(", "),
-                if c.remember_password {
-                    load_password(c.id).ok().flatten().unwrap_or_default()
-                } else {
-                    String::new()
-                },
-            ),
+        if self.credential_busy {
+            return;
+        }
+        let (name, server, labels) = match conn {
+            Some(c) => (c.name.clone(), c.server_display(), c.labels.join(", ")),
             None => Default::default(),
         };
         self.editing = conn.map(|c| c.id);
@@ -268,7 +264,7 @@ impl AddressBookApp {
         self.server_input
             .update(cx, |s, cx| s.set_value(server, window, cx));
         self.password_input
-            .update(cx, |s, cx| s.set_value(password, window, cx));
+            .update(cx, |s, cx| s.set_value("", window, cx));
         self.labels_input
             .update(cx, |s, cx| s.set_value(labels, window, cx));
         self.modal = Modal::Connection;
@@ -309,6 +305,9 @@ impl AddressBookApp {
     }
 
     fn submit_connect(&mut self, connect: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.credential_busy {
+            return;
+        }
         let name = self.name_input.read(cx).value().to_string();
         let server = self.server_input.read(cx).value().to_string();
         let password = self.password_input.read(cx).unmask_value().to_string();
@@ -336,32 +335,56 @@ impl AddressBookApp {
         conn.quality = self.quality;
         conn.view_only = self.view_only;
         conn.shared = self.shared;
+        let forget_password = conn.remember_password && !self.remember_password;
         conn.remember_password = self.remember_password;
-        if !self.remember_password {
-            let _ = delete_password(conn.id);
-        } else if !password.is_empty()
-            && let Err(e) = save_password(conn.id, &password)
-        {
-            self.status = format!("Password not saved: {e}").into();
-        }
-        let stored = if self.remember_password && password.is_empty() {
-            load_password(conn.id).ok().flatten()
-        } else {
-            None
-        };
-        let req = ConnectRequest::from_connection(
-            &conn,
-            if password.is_empty() {
-                stored
-            } else {
-                Some(password)
-            },
-        );
+        let id = conn.id;
+        let remember = conn.remember_password;
+        self.credential_busy = true;
+        self.set_status("Preparing connection…", cx);
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if forget_password {
+                        delete_password(id)?;
+                    }
+                    if remember && !password.is_empty() {
+                        save_password(id, &password)?;
+                    }
+                    if remember && password.is_empty() && connect {
+                        load_password(id)
+                    } else {
+                        Ok((!password.is_empty()).then_some(password))
+                    }
+                })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                this.credential_busy = false;
+                match result {
+                    Ok(password) => this.finish_submit(conn, password, connect, window, cx),
+                    Err(error) => this.set_status(error.to_string(), cx),
+                }
+            });
+        })
+        .detach();
+    }
+
+    fn finish_submit(
+        &mut self,
+        mut conn: Connection,
+        password: Option<String>,
+        connect: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let req = ConnectRequest::from_connection(&conn, password);
         if connect {
             conn.last_connected = Some(unix_now());
         }
         self.selected = Some(conn.id);
         self.modal = Modal::None;
+        self.password_input
+            .update(cx, |s, cx| s.set_value("", window, cx));
         let saved_name = conn.name.clone();
         self.book.upsert(conn);
         self.persist();
@@ -397,19 +420,52 @@ impl AddressBookApp {
     }
 
     fn connect_id(&mut self, id: ConnectionId, cx: &mut Context<Self>) {
-        let Some(mut conn) = self.book.get(id).cloned() else {
+        if self.credential_busy {
+            return;
+        }
+        let Some(conn) = self.book.get(id) else {
             return;
         };
-        conn.last_connected = Some(unix_now());
-        let password = if conn.remember_password {
-            load_password(id).ok().flatten()
-        } else {
-            None
-        };
-        let req = ConnectRequest::from_connection(&conn, password);
-        self.book.upsert(conn);
-        self.persist();
-        self.launch(req, cx);
+        let remember = conn.remember_password;
+        self.credential_busy = true;
+        self.set_status(
+            if remember {
+                "Unlocking saved password…"
+            } else {
+                "Preparing connection…"
+            },
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    if remember {
+                        load_password(id)
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.credential_busy = false;
+                match result {
+                    Ok(password) => {
+                        let Some(mut conn) = this.book.get(id).cloned() else {
+                            this.set_status("Connection no longer exists", cx);
+                            return;
+                        };
+                        conn.last_connected = Some(unix_now());
+                        let req = ConnectRequest::from_connection(&conn, password);
+                        this.book.upsert(conn);
+                        this.persist();
+                        this.launch(req, cx);
+                    }
+                    Err(error) => this.set_status(error.to_string(), cx),
+                }
+            });
+        })
+        .detach();
     }
 
     fn launch(&mut self, req: ConnectRequest, cx: &mut Context<Self>) {
@@ -453,6 +509,9 @@ impl AddressBookApp {
     }
 
     fn ask_delete(&mut self, id: ConnectionId, cx: &mut Context<Self>) {
+        if self.credential_busy {
+            return;
+        }
         let name = self
             .book
             .get(id)
@@ -486,6 +545,9 @@ impl AddressBookApp {
     }
 
     fn close_modal(&mut self, cx: &mut Context<Self>) {
+        if self.credential_busy {
+            return;
+        }
         self.modal = Modal::None;
         cx.notify();
     }
@@ -860,6 +922,14 @@ impl AddressBookApp {
                 .child(field("VNC server", Input::new(&self.server_input), cx))
                 .child(field("Name", Input::new(&self.name_input), cx))
                 .child(field("Password", Input::new(&self.password_input), cx))
+                .when(self.editing.is_some() && self.remember_password, |this| {
+                    this.child(
+                        div()
+                            .text_xs()
+                            .text_color(theme::muted(cx))
+                            .child("Leave the password blank to keep the saved password."),
+                    )
+                })
                 .child(field("Labels", Input::new(&self.labels_input), cx))
                 .child(connection_options(self, cx))
                 .child(
@@ -869,16 +939,22 @@ impl AddressBookApp {
                         .mt_1()
                         .child(
                             Button::new("modal-cancel")
+                                .disabled(self.credential_busy)
                                 .label("Cancel")
                                 .on_click(cx.listener(|this, _, _, cx| this.close_modal(cx))),
                         )
-                        .child(Button::new("modal-save").outline().label("Save").on_click(
-                            cx.listener(|this, _, window, cx| {
-                                this.submit_connect(false, window, cx)
-                            }),
-                        ))
+                        .child(
+                            Button::new("modal-save")
+                                .disabled(self.credential_busy)
+                                .outline()
+                                .label("Save")
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.submit_connect(false, window, cx)
+                                })),
+                        )
                         .child(
                             Button::new("modal-connect")
+                                .disabled(self.credential_busy)
                                 .primary()
                                 .label("Connect")
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -1152,7 +1228,7 @@ impl Render for AddressBookApp {
                             .icon(IconName::Play)
                             .label("Connect")
                             .tooltip("Connect to the selected entry (↩)")
-                            .disabled(!has_selection)
+                            .disabled(!has_selection || self.credential_busy)
                             .on_click(cx.listener(|this, _, window, cx| {
                                 this.on_connect(&ConnectSelected, window, cx);
                             })),
@@ -1522,6 +1598,9 @@ fn prefs_body(app: &AddressBookApp, cx: &mut Context<AddressBookApp>) -> impl In
                         .small()
                         .label("Forget all passwords and previews")
                         .on_click(cx.listener(|this, _, _, cx| {
+                            if this.credential_busy {
+                                return;
+                            }
                             match this.book.forget_sensitive() {
                                 Ok(()) => this.status = "Passwords and previews removed".into(),
                                 Err(e) => this.status = format!("Could not forget: {e}").into(),

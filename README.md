@@ -16,6 +16,7 @@ A native desktop VNC viewer written in Rust with [GPUI](https://www.gpui.rs/). D
 - VNC Auth, Tight / ZRLE / TRLE / Raw encodings
 - VeNCrypt TLS: `TLSVnc` / `TLSNone` (anonymous TLS, TigerVNC's default) via OpenSSL, `X509Vnc` / `X509None` via rustls with WebPKI roots. `Let server choose` picks encryption automatically when the server offers nothing else
 - Passwords stored in the OS keychain
+- Touch ID for saved passwords in signed macOS builds (with macOS password fallback)
 
 ## Build
 
@@ -63,6 +64,35 @@ RV_DATA_DIR=/tmp/rv-scratch cargo run -p rv-app -- 127.0.0.1:5999
 ```
 
 `RV_DATA_DIR` overrides the address-book location (default: the platform data directory).
+
+## macOS signing and Touch ID
+
+Touch ID-protected passwords require a Developer ID-signed app and a matching macOS
+Developer ID provisioning profile for `io.github.madeye.rv`. Package a release build with:
+
+```bash
+cargo build --release -p rv-app --locked
+python3 scripts/package-macos.py \
+  --binary target/release/rv --output target/release/RV.app \
+  --identity "$RV_SIGN_IDENTITY" --profile "$RV_PROVISION_PROFILE"
+```
+
+The packager embeds the profile, derives the app's Keychain entitlements from it,
+and verifies the signature. Omit both signing arguments for an ad-hoc bundle;
+ad-hoc builds and plain `cargo run` cannot access protected saved passwords. VNC
+connections with **Remember password** turned off still work in those builds.
+
+On first use, existing login-Keychain passwords are copied into the protected
+Keychain, then removed from the old store. macOS may request the login password
+once to authorize reading an old entry. Later reads use Touch ID when available;
+macOS retains its password fallback for unavailable or locked-out biometrics.
+Cancelling authentication cancels the connection attempt. Editing connection
+settings leaves saved passwords untouched unless a replacement is entered.
+
+For a manual authentication check, run `cargo build -p rv-core --example keychain_roundtrip`,
+package `target/debug/examples/keychain_roundtrip` with the
+same signing arguments, and run that bundle's `Contents/MacOS/rv` executable. The
+check creates, updates, authenticates, and removes a temporary test credential.
 
 ## Layout
 

@@ -5788,8 +5788,11 @@ dependencies = [
 name = "rv-core"
 version = "0.1.0"
 dependencies = [
+ "core-foundation 0.10.1",
  "directories",
  "keyring",
+ "security-framework 3.7.0",
+ "security-framework-sys",
  "serde",
  "serde_json",
  "thiserror 2.0.20",

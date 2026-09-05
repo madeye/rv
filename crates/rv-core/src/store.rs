@@ -7,6 +7,7 @@ use thiserror::Error;
 
 use crate::{Connection, ConnectionId, Preferences};
 
+#[cfg(not(target_os = "macos"))]
 const SERVICE: &str = "rv";
 
 #[derive(Debug, Error)]
@@ -17,6 +18,8 @@ pub enum StoreError {
     Json(#[from] serde_json::Error),
     #[error("keychain error: {0}")]
     Keyring(String),
+    #[error("Keychain authentication was cancelled")]
+    AuthenticationCancelled,
     #[error("unknown connection")]
     UnknownConnection,
 }
@@ -222,6 +225,10 @@ pub fn password_key(id: ConnectionId) -> String {
     id.to_string()
 }
 
+#[cfg(target_os = "macos")]
+pub use crate::macos_keychain::{delete_password, load_password, save_password};
+
+#[cfg(not(target_os = "macos"))]
 pub fn save_password(id: ConnectionId, password: &str) -> Result<(), StoreError> {
     let entry = keyring::Entry::new(SERVICE, &password_key(id))
         .map_err(|e| StoreError::Keyring(e.to_string()))?;
@@ -230,6 +237,7 @@ pub fn save_password(id: ConnectionId, password: &str) -> Result<(), StoreError>
         .map_err(|e| StoreError::Keyring(e.to_string()))
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn load_password(id: ConnectionId) -> Result<Option<String>, StoreError> {
     let entry = keyring::Entry::new(SERVICE, &password_key(id))
         .map_err(|e| StoreError::Keyring(e.to_string()))?;
@@ -240,6 +248,7 @@ pub fn load_password(id: ConnectionId) -> Result<Option<String>, StoreError> {
     }
 }
 
+#[cfg(not(target_os = "macos"))]
 pub fn delete_password(id: ConnectionId) -> Result<(), StoreError> {
     let entry = keyring::Entry::new(SERVICE, &password_key(id))
         .map_err(|e| StoreError::Keyring(e.to_string()))?;
