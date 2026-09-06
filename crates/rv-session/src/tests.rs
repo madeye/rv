@@ -331,10 +331,13 @@ fn key_events_are_not_starved_by_frame_updates() {
         )),
         "expected frames from the flooding server"
     );
-    // Let the backlog of decoded rectangles build up before typing.
+    // Let the backlog of decoded rectangles build up before typing. The
+    // generation is sampled around the pause, not around `drain()` alone: the
+    // decoder runs on its own thread and may not be scheduled during the few
+    // microseconds a drain takes.
+    let before = handle.framebuffer.lock().unwrap().generation;
     thread::sleep(Duration::from_millis(300));
 
-    let before = handle.framebuffer.lock().unwrap().generation;
     let events = handle.drain();
     let after = handle.framebuffer.lock().unwrap().generation;
     assert!(
