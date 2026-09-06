@@ -14,7 +14,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
-    parser.add_argument("--version", default="0.1.0")
+    parser.add_argument("--version", default="0.2.0")
     parser.add_argument("--identity", help="Developer ID Application signing identity")
     parser.add_argument("--profile", type=Path, help="Matching Developer ID provisioning profile")
     args = parser.parse_args()

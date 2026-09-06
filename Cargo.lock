@@ -5833,7 +5833,7 @@ dependencies = [
 
 [[package]]
 name = "rv-app"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "gpui",
@@ -5856,7 +5856,7 @@ dependencies = [
 
 [[package]]
 name = "rv-core"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "core-foundation 0.10.1",
  "directories",
@@ -5871,7 +5871,7 @@ dependencies = [
 
 [[package]]
 name = "rv-session"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "image",
  "openssl",
