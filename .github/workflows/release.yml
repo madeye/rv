@@ -25,11 +25,32 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: macos-universal
+          # Cargo.lock changes on every version bump, so target caching never
+          # hits between tags; only cache the registry and keep the disk free.
+          cache-targets: false
 
       - name: Build
+        # macos-14 (arm64) runners have 3 cores, 7 GB RAM and ~14 GB of free
+        # disk. Three parallel rustc jobs on the GPUI dependency tree exceed
+        # the RAM; the resulting swap files live on the boot volume and, in
+        # v0.2.0, first stalled the runner ("lost communication") and then
+        # filled the disk so hdiutil failed with "No space left on device".
+        # Two jobs keep peak memory within RAM.
+        env:
+          CARGO_BUILD_JOBS: 2
         run: |
+          set -euxo pipefail
+          df -h /
           cargo build --release -p rv-app --target aarch64-apple-darwin
           cargo build --release -p rv-app --target x86_64-apple-darwin
+          df -h /
+          mkdir -p dist/bin
+          cp "target/aarch64-apple-darwin/release/$BINARY" dist/bin/rv-aarch64
+          cp "target/x86_64-apple-darwin/release/$BINARY" dist/bin/rv-x86_64
+          # Only the two binaries are needed from here on; free the build tree
+          # so hdiutil has room for its scratch image.
+          rm -rf target
+          df -h /
 
       - name: Package RV.app + dmg
         run: |
@@ -40,9 +61,7 @@ jobs:
           APP=dist/RV.app
           mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
           cp assets/app-icon.icns "$APP/Contents/Resources/app-icon.icns"
-          lipo -create \
-            "target/aarch64-apple-darwin/release/$BINARY" \
-            "target/x86_64-apple-darwin/release/$BINARY" \
+          lipo -create dist/bin/rv-aarch64 dist/bin/rv-x86_64 \
             -output "$APP/Contents/MacOS/$BINARY"
           cat > "$APP/Contents/Info.plist" <<EOF
           <?xml version="1.0" encoding="UTF-8"?>
@@ -69,8 +88,10 @@ jobs:
           DMG_DIR=$(mktemp -d)
           cp -R "$APP" "$DMG_DIR/"
           ln -s /Applications "$DMG_DIR/Applications"
+          df -h /
           hdiutil create -volname "RV" -srcfolder "$DMG_DIR" -ov -format UDZO \
             "dist/rv-$VERSION-macos-universal.dmg"
+          rm -rf dist/bin
 
       - uses: actions/upload-artifact@v4
         with:
