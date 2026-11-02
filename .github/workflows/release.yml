@@ -15,7 +15,7 @@ env:
 jobs:
   build-macos:
     name: macOS (universal)
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v4
 
@@ -30,7 +30,7 @@ jobs:
           cache-targets: false
 
       - name: Build
-        # macos-14 (arm64) runners have 3 cores, 7 GB RAM and ~14 GB of free
+        # macos-15 (arm64) runners have 3 cores, 7 GB RAM and ~14 GB of free
         # disk. Three parallel rustc jobs on the GPUI dependency tree exceed
         # the RAM; the resulting swap files live on the boot volume and, in
         # v0.2.0, first stalled the runner ("lost communication") and then
