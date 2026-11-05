@@ -1,4 +1,4 @@
-use super::{Phase, SessionOptions, SessionView};
+use super::{Phase, SessionOptions, SessionView, dest_rect};
 use crate::actions::*;
 use gpui::{
     AppContext, Bounds, Entity, Modifiers, MouseButton, MouseExitEvent, Pixels, TestAppContext,
@@ -11,6 +11,24 @@ fn setup(
     cx: &mut TestAppContext,
     view_only: bool,
 ) -> (Entity<SessionView>, &mut VisualTestContext, SessionTestPeer) {
+    setup_with(
+        cx,
+        view_only,
+        800,
+        400,
+        ScaleMode::Fit,
+        size(px(1000.), px(800.)),
+    )
+}
+
+fn setup_with(
+    cx: &mut TestAppContext,
+    view_only: bool,
+    fb_w: u16,
+    fb_h: u16,
+    scale: ScaleMode,
+    window: gpui::Size<Pixels>,
+) -> (Entity<SessionView>, &mut VisualTestContext, SessionTestPeer) {
     cx.update(|cx| {
         gpui_component::init(cx);
         crate::bind_keys(cx);
@@ -19,11 +37,11 @@ fn setup(
     connection.view_only = view_only;
     let request = ConnectRequest::from_connection(&connection, None);
     let (handle, peer) = SessionHandle::test_pair();
-    handle.framebuffer.lock().unwrap().resize(800, 400);
+    handle.framebuffer.lock().unwrap().resize(fb_w, fb_h);
     peer.events
         .send(SessionEvent::Connected {
-            width: 800,
-            height: 400,
+            width: fb_w,
+            height: fb_h,
         })
         .unwrap();
     peer.events
@@ -36,7 +54,7 @@ fn setup(
                 request,
                 "Offscreen desktop".into(),
                 SessionOptions {
-                    scale: ScaleMode::Fit,
+                    scale,
                     pin_toolbar: true,
                     menu_key: "f8".into(),
                     hide_shots: true,
@@ -52,7 +70,7 @@ fn setup(
         entity = Some(view.clone());
         gpui_component::Root::new(view, window, cx)
     });
-    cx.simulate_resize(size(px(1000.), px(800.)));
+    cx.simulate_resize(window);
     cx.update(|window, cx| {
         window.activate_window();
         window.draw(cx).clear(cx);
@@ -209,4 +227,139 @@ fn offscreen_keyboard_forwards_pairs_and_consumes_menu_shortcuts(cx: &mut TestAp
         .collect();
     assert_eq!(keys, [(u32::from(b'a'), true), (u32::from(b'a'), false)]);
     view.read_with(cx, |view, _| assert!(!view.show_menu));
+}
+
+/// A remote framebuffer narrower (in aspect) than the session window: the
+/// window is `1000×800` (1.25:1) while the remote screen is `600×1200`
+/// (0.5:1, a portrait phone). Scale to fit must letterbox the full desktop
+/// inside the stage and map the pointer only within it.
+#[gpui::test]
+fn offscreen_fit_letterboxes_when_window_is_wider_than_remote(cx: &mut TestAppContext) {
+    let (view, cx, mut peer) = setup_with(
+        cx,
+        false,
+        600,
+        1200,
+        ScaleMode::Fit,
+        size(px(1000.), px(800.)),
+    );
+    let box_ = picture(&view, cx);
+
+    // The stage spans the window width and sits below the title/toolbar.
+    assert_eq!(box_.origin.x, px(0.));
+    assert_eq!(box_.size.width, px(1000.));
+    assert!(box_.origin.y >= px(0.));
+    assert!(box_.size.height > px(400.) && box_.size.height <= px(800.));
+
+    // Fit geometry the app draws and maps to: the desktop becomes a centered
+    // strip the height of the stage (height-constrained, since the remote is
+    // taller relative to its width than the window is).
+    let (dx, dy, dw, dh) = dest_rect(
+        f32::from(box_.size.width),
+        f32::from(box_.size.height),
+        600,
+        1200,
+        ScaleMode::Fit,
+    );
+    assert_eq!(dy, 0.);
+    assert_eq!(dh, f32::from(box_.size.height));
+    assert!(dx > 0.);
+
+    // The strip's corners map to the remote's corners...
+    view.read_with(cx, |view, _| {
+        let origin = box_.origin + point(px(dx), px(dy));
+        let far = box_.origin + point(px(dx + dw - 1.), px(dy + dh - 1.));
+        assert_eq!(view.map_pointer(origin), Some((0, 0)));
+        // The far edge lands within a pixel of the remote's bottom-right
+        // corner; fractional stage sizes round down by at most one pixel.
+        assert_eq!(view.map_pointer(far), Some((598, 1198)));
+        // ...while the letterbox outside it sends nothing to the remote.
+        let letterbox = box_.origin + point(px(0.), px(dh * 0.5));
+        assert_eq!(view.map_pointer(letterbox), None);
+        let letterbox = box_.origin + point(px(f32::from(box_.size.width) - 1.), px(dh * 0.5));
+        assert_eq!(view.map_pointer(letterbox), None);
+    });
+
+    // A click inside the strip reaches the remote.
+    cx.simulate_mouse_move(
+        box_.origin + point(px(dx + dw * 0.5), px(dy + dh * 0.5)),
+        None,
+        Modifiers::default(),
+    );
+    cx.simulate_mouse_down(
+        box_.origin + point(px(dx + dw * 0.5), px(dy + dh * 0.5)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    cx.simulate_mouse_up(
+        box_.origin + point(px(dx + dw * 0.5), px(dy + dh * 0.5)),
+        MouseButton::Left,
+        Modifiers::default(),
+    );
+    let pointers: Vec<_> = commands(&mut peer)
+        .into_iter()
+        .map(|command| {
+            let SessionCommand::Input(vnc::X11Event::PointerEvent(event)) = command else {
+                panic!("unexpected command: {command:?}");
+            };
+            (event.position_x, event.position_y)
+        })
+        .collect();
+    assert_eq!(pointers, [(300, 600), (300, 600), (300, 600)]);
+    // Cursor stays visible over the letterbox (nothing remote there to hide it).
+    cx.simulate_mouse_move(
+        box_.origin + point(px(1.), px(dh * 0.5)),
+        None,
+        Modifiers::default(),
+    );
+    assert!(!hidden(&view, cx));
+}
+
+/// Stretch mode with a remote narrower than the window must fill the whole
+/// stage and map the pointer across it.
+#[gpui::test]
+fn offscreen_stretch_fills_stage_when_window_is_wider_than_remote(cx: &mut TestAppContext) {
+    let (view, cx, mut peer) = setup_with(
+        cx,
+        false,
+        600,
+        1200,
+        ScaleMode::Stretch,
+        size(px(1000.), px(800.)),
+    );
+    let box_ = picture(&view, cx);
+    assert_eq!(box_.origin.x, px(0.));
+    assert_eq!(box_.size.width, px(1000.));
+    assert!(box_.size.height > px(400.) && box_.size.height <= px(800.));
+
+    view.read_with(cx, |view, _| {
+        // Stretch fills the whole box, so every corner of the stage maps to a
+        // remote corner and no point in the stage is dead space.
+        let corners = [
+            box_.origin,
+            box_.origin + point(box_.size.width - px(1.), px(0.)),
+            box_.origin + point(px(0.), box_.size.height - px(1.)),
+            box_.origin + point(box_.size.width - px(1.), box_.size.height - px(1.)),
+        ];
+        assert_eq!(view.map_pointer(corners[0]), Some((0, 0)));
+        assert_eq!(view.map_pointer(corners[1]), Some((599, 0)));
+        assert_eq!(view.map_pointer(corners[2]), Some((0, 1198)));
+        assert_eq!(view.map_pointer(corners[3]), Some((599, 1198)));
+    });
+
+    // A click at a bottom corner reaches the remote.
+    let far = box_.origin + point(box_.size.width - px(1.), box_.size.height - px(1.));
+    cx.simulate_mouse_move(far, None, Modifiers::default());
+    cx.simulate_click(far, Modifiers::default());
+    let pointers: Vec<_> = commands(&mut peer)
+        .into_iter()
+        .map(|command| {
+            let SessionCommand::Input(vnc::X11Event::PointerEvent(event)) = command else {
+                panic!("unexpected command: {command:?}");
+            };
+            (event.position_x, event.position_y)
+        })
+        .collect();
+    assert_eq!(pointers, [(599, 1198), (599, 1198), (599, 1198)]);
+    assert!(hidden(&view, cx));
 }

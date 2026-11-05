@@ -1049,6 +1049,7 @@ impl SessionView {
         match self.scale {
             ScaleMode::Fit | ScaleMode::Stretch => div()
                 .relative()
+                .flex()
                 .size_full()
                 .child(img(image).id("fb").size_full().object_fit(
                     if self.scale == ScaleMode::Fit {
